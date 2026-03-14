@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-agent-config
+data:
+  config.yaml: |
+    server:
+      host: "0.0.0.0"
+      port: 8080
+      mode: "production"
+
+    orchestrator:
+      max_concurrent_tasks: 100
+      task_timeout: 300
+      enable_dag_validation: true
+
+    redis:
+      host: "redis-service"
+      port: 6379
+      password: ""
+      db: 0
+      pool_size: 10
+
+    mysql:
+      host: "mysql-service"
+      port: 3306
+      username: "root"
+      database: "ai_agent_arrange"
+      max_idle_conns: 10
+      max_open_conns: 100
+
+    rabbitmq:
+      host: "rabbitmq-service"
+      port: 5672
+      username: "guest"
+      password: "guest"
+      vhost: "/"
+      queues:
+        task: "agent-tasks"
+        result: "agent-results"
+      exchange: "ai-agent-exchange"
+      exchange_type: "topic"
+
+    monitoring:
+      prometheus:
+        enabled: true
+        port: 9090
+
+    logging:
+      level: "info"
+      format: "json"
+      output: "stdout"

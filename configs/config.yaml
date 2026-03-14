@@ -1,0 +1,71 @@
+server:
+  host: "${SERVER_HOST:-0.0.0.0}"
+  port: ${SERVER_PORT:-8080}
+  mode: "${SERVER_MODE:-development}" # development, production
+
+orchestrator:
+  max_concurrent_tasks: 100
+  task_timeout: 300 # seconds
+  enable_dag_validation: true
+
+redis:
+  host: "${REDIS_HOST:-localhost}"
+  port: ${REDIS_PORT:-6379}
+  password: "${REDIS_PASSWORD}"
+  db: 0
+  pool_size: 10
+
+mysql:
+  host: "${MYSQL_HOST:-localhost}"
+  port: ${MYSQL_PORT:-3307}
+  username: "${MYSQL_USER:-root}"
+  password: "${MYSQL_PASSWORD}"
+  database: "${MYSQL_DATABASE:-ai_agent_arrange}"
+  max_idle_conns: 10
+  max_open_conns: 100
+
+rabbitmq:
+  host: "${RABBITMQ_HOST:-localhost}"
+  port: ${RABBITMQ_PORT:-5672}
+  username: "${RABBITMQ_USER:-guest}"
+  password: "${RABBITMQ_PASSWORD:-guest}"
+  vhost: "/"
+  queues:
+    task: "agent-tasks"
+    result: "agent-results"
+  exchange: "ai-agent-exchange"
+  exchange_type: "topic"
+
+milvus:
+  host: "localhost"
+  port: 19530
+  collection_name: "agent_memory"
+
+llm:
+  default_provider: "openai"
+  providers:
+    openai:
+      api_key: "${OPENAI_API_KEY}"
+      model: "gpt-4"
+      max_tokens: 4096
+      temperature: 0.7
+    qwen:
+      api_key: "${QWEN_API_KEY}"
+      model: "qwen-turbo"
+    claude:
+      api_key: "${CLAUDE_API_KEY}"
+      model: "claude-3-opus-20240229"
+
+monitoring:
+  prometheus:
+    enabled: true
+    port: 9090
+  tracing:
+    enabled: true
+    endpoint: "localhost:4318"
+
+logging:
+  level: "${LOG_LEVEL:-info}" # debug, info, warn, error
+  format: "${LOG_FORMAT:-json}" # json, console
+  output: "stdout" # stdout, file
+  file_path: "logs/app.log"

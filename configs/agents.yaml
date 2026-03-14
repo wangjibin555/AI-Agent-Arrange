@@ -1,0 +1,42 @@
+agents:
+  - name: "calculator"
+    type: "builtin"
+    description: "Performs mathematical calculations"
+    capabilities:
+      - "math"
+      - "arithmetic"
+    enabled: true
+
+  - name: "file_parser"
+    type: "builtin"
+    description: "Parses various file formats (Excel, CSV, PDF)"
+    capabilities:
+      - "file_processing"
+      - "data_extraction"
+    enabled: true
+
+  - name: "web_scraper"
+    type: "builtin"
+    description: "Scrapes web content and extracts information"
+    capabilities:
+      - "web_scraping"
+      - "data_collection"
+    enabled: true
+
+  - name: "data_analyst"
+    type: "llm"
+    description: "Analyzes data and generates insights"
+    llm_provider: "openai"
+    capabilities:
+      - "data_analysis"
+      - "trend_analysis"
+    enabled: true
+
+  - name: "report_generator"
+    type: "llm"
+    description: "Generates structured reports and documents"
+    llm_provider: "claude"
+    capabilities:
+      - "document_generation"
+      - "report_writing"
+    enabled: true

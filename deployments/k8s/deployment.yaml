@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-agent-orchestrator
+  labels:
+    app: ai-agent-orchestrator
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ai-agent-orchestrator
+  template:
+    metadata:
+      labels:
+        app: ai-agent-orchestrator
+    spec:
+      containers:
+      - name: orchestrator
+        image: ai-agent-arrange:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: SERVER_PORT
+          value: "8080"
+        - name: REDIS_HOST
+          value: redis-service
+        - name: MYSQL_HOST
+          value: mysql-service
+        - name: RABBITMQ_HOST
+          value: rabbitmq-service
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-agent-worker
+  labels:
+    app: ai-agent-worker
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: ai-agent-worker
+  template:
+    metadata:
+      labels:
+        app: ai-agent-worker
+    spec:
+      containers:
+      - name: agent
+        image: ai-agent-arrange:latest
+        imagePullPolicy: IfNotPresent
+        command: ["/app/agent"]
+        env:
+        - name: REDIS_HOST
+          value: redis-service
+        - name: RABBITMQ_HOST
+          value: rabbitmq-service
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"

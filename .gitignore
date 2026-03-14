@@ -1,0 +1,72 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.txt
+
+# Go workspace file
+go.work
+
+# Dependency directories
+vendor/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Configuration files with secrets
+configs/*.local.yaml
+configs/secrets.yaml
+
+# Build artifacts
+cmd/server/server
+cmd/agent/agent
+cmd/cli/cli
+
+# Database
+*.db
+*.sqlite
+
+# Node modules (for web frontend)
+node_modules/
+web/dist/
+web/.nuxt/
+web/.next/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# MinIO data
+minio-data/
+
+# K8s secrets
+deployments/k8s/*-secret.yaml

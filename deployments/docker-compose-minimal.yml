@@ -1,0 +1,59 @@
+version: '3.8'
+
+# 最小化开发环境 - 只包含核心服务
+# 使用方式: docker-compose -f deployments/docker-compose-minimal.yml up -d
+
+services:
+  # 缓存和短期记忆
+  redis:
+    image: redis:7-alpine
+    container_name: ai-agent-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+
+  # 关系型数据库
+  mysql:
+    image: mysql:8.0
+    container_name: ai-agent-mysql
+    ports:
+      - "${MYSQL_PORT:-3307}:3306"  # 使用环境变量，默认 3307
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-ai_agent_arrange}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ../migrations:/docker-entrypoint-initdb.d
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 消息队列
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: ai-agent-rabbitmq
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"   # AMQP 协议端口
+      - "15672:15672" # Web 管理界面
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  redis-data:
+  mysql-data:
+  rabbitmq-data:

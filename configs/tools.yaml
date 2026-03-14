@@ -1,0 +1,57 @@
+tools:
+  - name: "http_request"
+    type: "builtin"
+    description: "Makes HTTP requests to external APIs"
+    parameters:
+      - name: "url"
+        type: "string"
+        required: true
+      - name: "method"
+        type: "string"
+        required: true
+        enum: ["GET", "POST", "PUT", "DELETE"]
+      - name: "headers"
+        type: "object"
+        required: false
+      - name: "body"
+        type: "object"
+        required: false
+
+  - name: "database_query"
+    type: "builtin"
+    description: "Executes database queries"
+    parameters:
+      - name: "query"
+        type: "string"
+        required: true
+      - name: "params"
+        type: "array"
+        required: false
+
+  - name: "file_read"
+    type: "builtin"
+    description: "Reads file content"
+    parameters:
+      - name: "file_path"
+        type: "string"
+        required: true
+      - name: "encoding"
+        type: "string"
+        required: false
+        default: "utf-8"
+
+  - name: "file_write"
+    type: "builtin"
+    description: "Writes content to file"
+    parameters:
+      - name: "file_path"
+        type: "string"
+        required: true
+      - name: "content"
+        type: "string"
+        required: true
+      - name: "mode"
+        type: "string"
+        required: false
+        default: "overwrite"
+        enum: ["overwrite", "append"]
