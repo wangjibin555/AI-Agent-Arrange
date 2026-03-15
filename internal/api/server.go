@@ -78,6 +78,7 @@ func (s *Server) setupRoutes() {
 			tasks.POST("", s.handleCreateTask)
 			tasks.GET("/:id", s.handleGetTask)
 			tasks.GET("", s.handleListTasks)
+			tasks.DELETE("/:id", s.handleCancelTask) // Cancel task
 		}
 
 		// Smart task with auto agent selection

@@ -293,6 +293,53 @@ func (s *Server) handleCreateSmartTask(c *gin.Context) {
 	})
 }
 
+// handleCancelTask handles task cancellation
+func (s *Server) handleCancelTask(c *gin.Context) {
+	taskID := c.Param("id")
+
+	// 看任务是否存在，是否可以被取消
+	task, err := s.engine.GetTask(taskID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, Response{
+			Success: false,
+			Error:   fmt.Sprintf("Task not found: %s", taskID),
+		})
+		return
+	}
+
+	// 看任务是否已经完成
+	if task.Status == orchestrator.TaskStatusCompleted ||
+		task.Status == orchestrator.TaskStatusFailed ||
+		task.Status == orchestrator.TaskStatusCancelled {
+		c.JSON(http.StatusBadRequest, Response{
+			Success: false,
+			Error:   fmt.Sprintf("Cannot cancel task in '%s' status", task.Status),
+			Message: "Only pending or running tasks can be cancelled",
+		})
+		return
+	}
+
+	// 如果以上校验都通过了，就可以进行取消了
+	taskManager := s.engine.GetTaskManager()
+	if err := taskManager.CancelTask(taskID); err != nil {
+		c.JSON(http.StatusInternalServerError, Response{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	// 将
+	updatedTask, _ := s.engine.GetTask(taskID)
+	response := convertTaskToResponse(updatedTask)
+
+	c.JSON(http.StatusOK, Response{
+		Success: true,
+		Data:    response,
+		Message: "Task cancelled successfully",
+	})
+}
+
 // convertTaskToResponse converts a Task to TaskResponse
 func convertTaskToResponse(task *orchestrator.Task) *TaskResponse {
 	return &TaskResponse{

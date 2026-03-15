@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS task_logs (
 	return nil
 }
 
-// DropTables drops all tables (for testing purposes)
+// 删除当前项目数据库内部对应数据表，仅用于测试，进行数据隔离
 func (db *DB) DropTables() error {
 	logger.Warn("Dropping all tables (this will delete all data)")
 
