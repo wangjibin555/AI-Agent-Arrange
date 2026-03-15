@@ -43,10 +43,16 @@ func NewServer(engine *orchestrator.Engine, host string, port int, mode string) 
 		router: router,
 		addr:   addr,
 		server: &http.Server{
-			Addr:           addr,
-			Handler:        router,
-			ReadTimeout:    10 * time.Second,
-			WriteTimeout:   10 * time.Second,
+			Addr:    addr,
+			Handler: router,
+			// Increase timeouts to handle long-running tasks
+			// ReadTimeout: time to read the request (including body)
+			ReadTimeout: 30 * time.Second,
+			// WriteTimeout: time to write the response
+			// Set to 5 minutes to allow for long-running tasks
+			WriteTimeout: 5 * time.Minute,
+			// IdleTimeout: time to keep connection alive
+			IdleTimeout:    120 * time.Second,
 			MaxHeaderBytes: 1 << 20, // 1MB
 		},
 	}

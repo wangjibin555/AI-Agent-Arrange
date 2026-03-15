@@ -68,7 +68,10 @@ func main() {
 	registry := agent.NewRegistry()
 	logger.Info("Agent registry initialized")
 
-	// TODO: Load and register agents from configuration
+	// Register agents
+	if err := registerAgents(registry); err != nil {
+		logger.Fatal("Failed to register agents", zap.Error(err))
+	}
 
 	// Initialize orchestration engine
 	engine := orchestrator.NewEngine(registry, cfg.Orchestrator.MaxConcurrentTasks)
@@ -99,25 +102,34 @@ func main() {
 
 	// Wait for interrupt signal
 	<-sigChan
-	logger.Info("Received shutdown signal")
+	logger.Info("Received shutdown signal, initiating graceful shutdown")
 	fmt.Println("\n🛑 Shutting down gracefully...")
 
-	// Create shutdown context with timeout
+	// Step 1: Stop accepting new HTTP requests
+	// Create shutdown context with timeout for HTTP server
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
-	// Stop HTTP server
+	fmt.Println("   ⏳ Stopping HTTP server...")
 	if err := httpServer.Stop(shutdownCtx); err != nil {
 		logger.Error("Error stopping HTTP server", zap.Error(err))
+		fmt.Printf("   ❌ HTTP server stop error: %v\n", err)
+	} else {
+		fmt.Println("   ✅ HTTP server stopped")
 	}
 
-	// Stop the engine
+	// Step 2: Stop the orchestration engine
+	// This will wait for workers to finish their current tasks
+	fmt.Println("   ⏳ Stopping orchestration engine (waiting for tasks to complete)...")
 	if err := engine.Stop(); err != nil {
 		logger.Error("Error stopping engine", zap.Error(err))
+		fmt.Printf("   ❌ Engine stop error: %v\n", err)
+	} else {
+		fmt.Println("   ✅ Orchestration engine stopped")
 	}
 
-	logger.Info("Server stopped successfully")
-	fmt.Println("✅ Server stopped")
+	logger.Info("Server shutdown completed")
+	fmt.Println("✅ Server stopped gracefully")
 }
 
 // loadConfig loads and validates configuration
@@ -143,4 +155,186 @@ func initLogger(cfg *config.Config) error {
 	}
 
 	return logger.Init(loggerConfig)
+}
+
+// registerAgents registers all agents (Echo, OpenAI, DeepSeek)
+func registerAgents(registry *agent.Registry) error {
+	// 1. Register EchoAgents for testing
+	if err := registerEchoAgents(registry); err != nil {
+		return err
+	}
+
+	// 2. Register OpenAI Agent (for complex tasks)
+	if err := registerOpenAIAgents(registry); err != nil {
+		logger.Warn("Failed to register OpenAI agents", zap.Error(err))
+		// 不中断启动，允许没有 OpenAI API Key 的情况
+	}
+
+	// 3. Register DeepSeek Agent (for lightweight tasks)
+	if err := registerDeepSeekAgents(registry); err != nil {
+		logger.Warn("Failed to register DeepSeek agents", zap.Error(err))
+		// 不中断启动，允许没有 DeepSeek API Key 的情况
+	}
+
+	return nil
+}
+
+// registerEchoAgents registers test EchoAgent instances
+func registerEchoAgents(registry *agent.Registry) error {
+	// Create multiple EchoAgent instances for testing load balancing
+	agents := []struct {
+		name  string
+		delay int // milliseconds
+	}{
+		{"echo-agent-1", 100},
+		{"echo-agent-2", 150},
+		{"echo-agent-3", 200},
+	}
+
+	for _, agentInfo := range agents {
+		// Create agent
+		echoAgent := agent.NewEchoAgent(agentInfo.name)
+
+		// Configure agent
+		config := &agent.Config{
+			Name:        agentInfo.name,
+			Type:        "echo",
+			Description: fmt.Sprintf("Echo agent with %dms delay", agentInfo.delay),
+			Capabilities: []string{
+				"text-processing",
+				"health-check",
+			},
+			Settings: map[string]interface{}{
+				"delay_ms": agentInfo.delay,
+			},
+		}
+
+		if err := echoAgent.Init(config); err != nil {
+			return fmt.Errorf("failed to initialize %s: %w", agentInfo.name, err)
+		}
+
+		// Register agent
+		if err := registry.Register(echoAgent); err != nil {
+			return fmt.Errorf("failed to register %s: %w", agentInfo.name, err)
+		}
+
+		logger.Info("Registered agent",
+			zap.String("name", agentInfo.name),
+			zap.String("type", "echo"),
+			zap.Strings("capabilities", echoAgent.GetCapabilities()),
+		)
+	}
+
+	logger.Info("All EchoAgents registered successfully",
+		zap.Int("count", len(agents)),
+	)
+
+	return nil
+}
+
+// registerOpenAIAgents registers OpenAI agents for complex tasks
+func registerOpenAIAgents(registry *agent.Registry) error {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" || apiKey == "your-openai-api-key-here" {
+		return fmt.Errorf("OPENAI_API_KEY not set in environment")
+	}
+
+	model := os.Getenv("OPENAI_MODEL")
+	if model == "" {
+		model = "gpt-3.5-turbo" // 默认模型
+	}
+
+	// Create OpenAI agent
+	openaiAgent := agent.NewOpenAIAgent("openai-gpt-agent", apiKey)
+
+	// Configure agent
+	config := &agent.Config{
+		Name:        "openai-gpt-agent",
+		Type:        "openai",
+		Description: "OpenAI GPT agent for complex tasks: coding, reasoning, debugging",
+		Capabilities: []string{
+			"code-generation",
+			"code-review",
+			"debugging",
+			"complex-reasoning",
+			"translation",
+			"text-generation",
+		},
+		Settings: map[string]interface{}{
+			"model":       model,
+			"temperature": 0.7,
+			"max_tokens":  2000,
+		},
+	}
+
+	if err := openaiAgent.Init(config); err != nil {
+		return fmt.Errorf("failed to initialize OpenAI agent: %w", err)
+	}
+
+	// Register agent
+	if err := registry.Register(openaiAgent); err != nil {
+		return fmt.Errorf("failed to register OpenAI agent: %w", err)
+	}
+
+	logger.Info("Registered agent",
+		zap.String("name", "openai-gpt-agent"),
+		zap.String("type", "openai"),
+		zap.String("model", model),
+		zap.Strings("capabilities", openaiAgent.GetCapabilities()),
+	)
+
+	return nil
+}
+
+// registerDeepSeekAgents registers DeepSeek agents for lightweight tasks
+func registerDeepSeekAgents(registry *agent.Registry) error {
+	apiKey := os.Getenv("DEEPSEEK_API_KEY")
+	if apiKey == "" || apiKey == "your-deepseek-api-key-here" {
+		return fmt.Errorf("DEEPSEEK_API_KEY not set in environment")
+	}
+
+	model := os.Getenv("DEEPSEEK_MODEL")
+	if model == "" {
+		model = "deepseek-chat" // 默认模型
+	}
+
+	// Create DeepSeek agent
+	deepseekAgent := agent.NewDeepSeekAgent("deepseek-chat-agent", apiKey)
+
+	// Configure agent
+	config := &agent.Config{
+		Name:        "deepseek-chat-agent",
+		Type:        "deepseek",
+		Description: "DeepSeek agent for lightweight tasks: Q&A, summarization, knowledge",
+		Capabilities: []string{
+			"question-answering",
+			"summarization",
+			"knowledge-extraction",
+			"text-generation",
+			"conversation",
+		},
+		Settings: map[string]interface{}{
+			"model":       model,
+			"temperature": 0.7,
+			"max_tokens":  2000,
+		},
+	}
+
+	if err := deepseekAgent.Init(config); err != nil {
+		return fmt.Errorf("failed to initialize DeepSeek agent: %w", err)
+	}
+
+	// Register agent
+	if err := registry.Register(deepseekAgent); err != nil {
+		return fmt.Errorf("failed to register DeepSeek agent: %w", err)
+	}
+
+	logger.Info("Registered agent",
+		zap.String("name", "deepseek-chat-agent"),
+		zap.String("type", "deepseek"),
+		zap.String("model", model),
+		zap.Strings("capabilities", deepseekAgent.GetCapabilities()),
+	)
+
+	return nil
 }

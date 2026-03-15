@@ -20,6 +20,12 @@ go.work
 # Dependency directories
 vendor/
 
+# Scripts
+scripts/
+
+# Docs
+docs/
+
 # Environment variables
 .env
 .env.local

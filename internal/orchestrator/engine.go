@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/wepie/ai-agent-arrange/internal/agent"
+	"github.com/wepie/ai-agent-arrange/pkg/logger"
+	"go.uber.org/zap"
 )
 
 // Engine is the core orchestration engine
@@ -15,6 +17,9 @@ type Engine struct {
 	taskManager   *TaskManager
 	healthChecker *HealthChecker
 	workers       []*Worker
+	workerWg      sync.WaitGroup // Wait for workers to finish
+	workerCtx     context.Context
+	workerCancel  context.CancelFunc
 	mu            sync.RWMutex
 	running       bool
 }
@@ -51,33 +56,71 @@ func (e *Engine) Start(ctx context.Context) error {
 	e.running = true
 	e.mu.Unlock()
 
+	logger.Info("Starting orchestration engine",
+		zap.Int("worker_count", len(e.workers)),
+	)
+
+	// Create worker context
+	e.workerCtx, e.workerCancel = context.WithCancel(ctx)
+
 	// Start health checker
-	e.healthChecker.Start(ctx)
+	e.healthChecker.Start(e.workerCtx)
 
 	// Start workers
 	for i := 0; i < len(e.workers); i++ {
 		worker := NewWorker(i, e.agentRegistry, e.taskManager)
 		e.workers[i] = worker
-		go worker.Start(ctx)
+
+		e.workerWg.Add(1)
+		go func(w *Worker) {
+			defer e.workerWg.Done()
+			w.Start(e.workerCtx)
+		}(worker)
 	}
 
+	logger.Info("Orchestration engine started successfully")
 	return nil
 }
 
-// Stop stops the orchestration engine
+// Stop stops the orchestration engine gracefully
 func (e *Engine) Stop() error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	if !e.running {
+		e.mu.Unlock()
 		return fmt.Errorf("engine not running")
 	}
+	e.running = false
+	e.mu.Unlock()
 
-	// Stop health checker
+	logger.Info("Stopping orchestration engine gracefully...")
+
+	// Step 1: Cancel worker context to signal shutdown
+	if e.workerCancel != nil {
+		logger.Info("Signaling workers to stop")
+		e.workerCancel()
+	}
+
+	// Step 2: Wait for all workers to finish their current tasks
+	logger.Info("Waiting for workers to finish current tasks...")
+	workerDone := make(chan struct{})
+	go func() {
+		e.workerWg.Wait()
+		close(workerDone)
+	}()
+
+	// Wait with timeout (30 seconds)
+	select {
+	case <-workerDone:
+		logger.Info("All workers stopped gracefully")
+	case <-time.After(30 * time.Second):
+		logger.Warn("Workers did not stop within timeout, forcing shutdown")
+	}
+
+	// Step 3: Stop health checker
+	logger.Info("Stopping health checker")
 	e.healthChecker.Stop()
 
-	e.running = false
-
+	logger.Info("Orchestration engine stopped successfully")
 	return nil
 }
 

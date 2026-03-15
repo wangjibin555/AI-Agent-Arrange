@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -117,9 +118,15 @@ func (s *Server) handleCreateTask(c *gin.Context) {
 
 	// Create task
 	taskID := uuid.New().String()
+
+	// Set timeout (default: 60 seconds for normal tasks)
 	timeout := time.Duration(req.Timeout) * time.Second
 	if timeout == 0 {
-		timeout = 30 * time.Second // default timeout
+		timeout = 60 * time.Second // default timeout: 60 seconds
+	}
+	// Maximum timeout: 5 minutes to prevent hanging tasks
+	if timeout > 5*time.Minute {
+		timeout = 5 * time.Minute
 	}
 
 	task := &orchestrator.Task{
@@ -166,25 +173,113 @@ func (s *Server) handleCreateTask(c *gin.Context) {
 
 // handleGetTask handles getting a specific task
 func (s *Server) handleGetTask(c *gin.Context) {
-	_ = c.Param("id") // taskID will be used after implementing storage
+	taskID := c.Param("id")
 
-	// TODO: Implement task retrieval from storage
-	// For now, return a placeholder response
-	c.JSON(http.StatusNotImplemented, Response{
-		Success: false,
-		Error:   "Task retrieval not yet implemented",
-		Message: "This endpoint will be available after implementing task storage",
+	// Get task from engine
+	task, err := s.engine.GetTask(taskID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, Response{
+			Success: false,
+			Error:   fmt.Sprintf("Task not found: %s", taskID),
+		})
+		return
+	}
+
+	// Convert to response
+	response := convertTaskToResponse(task)
+
+	c.JSON(http.StatusOK, Response{
+		Success: true,
+		Data:    response,
 	})
 }
 
 // handleListTasks handles listing all tasks
 func (s *Server) handleListTasks(c *gin.Context) {
-	// TODO: Implement task listing from storage
-	// For now, return a placeholder response
-	c.JSON(http.StatusNotImplemented, Response{
-		Success: false,
-		Error:   "Task listing not yet implemented",
-		Message: "This endpoint will be available after implementing task storage",
+	// Get query parameters
+	status := c.Query("status")    // 过滤状态：pending, running, completed, failed
+	agentName := c.Query("agent")  // 过滤 Agent
+	limitStr := c.Query("limit")   // 分页：每页数量
+	offsetStr := c.Query("offset") // 分页：偏移量
+
+	// Parse pagination parameters
+	limit := 50 // 默认每页 50 条
+	offset := 0
+
+	if limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+	if offsetStr != "" {
+		if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+
+	// Get task manager from engine
+	taskManager := s.engine.GetTaskManager()
+
+	var tasks []*orchestrator.Task
+
+	// Filter by status if specified
+	if status != "" {
+		taskStatus := orchestrator.TaskStatus(status)
+		tasks = taskManager.GetTasksByStatus(taskStatus)
+	} else {
+		// Get all tasks from all statuses
+		allTasks := make([]*orchestrator.Task, 0)
+		for _, st := range []orchestrator.TaskStatus{
+			orchestrator.TaskStatusPending,
+			orchestrator.TaskStatusRunning,
+			orchestrator.TaskStatusCompleted,
+			orchestrator.TaskStatusFailed,
+			orchestrator.TaskStatusCancelled,
+		} {
+			allTasks = append(allTasks, taskManager.GetTasksByStatus(st)...)
+		}
+		tasks = allTasks
+	}
+
+	// Filter by agent if specified
+	if agentName != "" {
+		filtered := make([]*orchestrator.Task, 0)
+		for _, task := range tasks {
+			if task.AgentName == agentName {
+				filtered = append(filtered, task)
+			}
+		}
+		tasks = filtered
+	}
+
+	// Apply pagination
+	total := len(tasks)
+	start := offset
+	end := offset + limit
+
+	if start > total {
+		start = total
+	}
+	if end > total {
+		end = total
+	}
+
+	paginatedTasks := tasks[start:end]
+
+	// Convert to response
+	responses := make([]*TaskResponse, len(paginatedTasks))
+	for i, task := range paginatedTasks {
+		responses[i] = convertTaskToResponse(task)
+	}
+
+	c.JSON(http.StatusOK, Response{
+		Success: true,
+		Data: gin.H{
+			"tasks":  responses,
+			"total":  total,
+			"limit":  limit,
+			"offset": offset,
+		},
 	})
 }
 
