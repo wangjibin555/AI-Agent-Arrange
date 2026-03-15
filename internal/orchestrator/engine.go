@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wepie/ai-agent-arrange/internal/agent"
-	"github.com/wepie/ai-agent-arrange/pkg/logger"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/agent"
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/logger"
 	"go.uber.org/zap"
 )
 
@@ -24,14 +24,20 @@ type Engine struct {
 	running       bool
 }
 
-// NewEngine creates a new orchestration engine
+// NewEngine creates a new orchestration engine without persistence
 func NewEngine(registry *agent.Registry, maxWorkers int) *Engine {
+	return NewEngineWithRepository(registry, maxWorkers, nil)
+}
+
+// NewEngineWithRepository creates a new orchestration engine with optional persistence
+func NewEngineWithRepository(registry *agent.Registry, maxWorkers int, repository TaskRepository) *Engine {
 	// Create task manager with default configuration
 	taskManagerConfig := TaskManagerConfig{
 		MaxRetries:       3, // 最大重试3次
 		RetryInterval:    5 * time.Second,
-		MaxPendingTasks:  10000, // 最多待执行10000个任务
-		MaxTasksPerAgent: 100,   // 单个Agent最多100个并发任务
+		MaxPendingTasks:  10000,      // 最多待执行10000个任务
+		MaxTasksPerAgent: 100,        // 单个Agent最多100个并发任务
+		Repository:       repository, // 可选的持久化存储
 	}
 	taskManager := NewTaskManager(registry, taskManagerConfig)
 

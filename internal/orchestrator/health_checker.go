@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wepie/ai-agent-arrange/internal/agent"
-	"github.com/wepie/ai-agent-arrange/pkg/logger"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/agent"
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/logger"
 	"go.uber.org/zap"
 )
 

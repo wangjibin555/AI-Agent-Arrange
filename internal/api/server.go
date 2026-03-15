@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/wepie/ai-agent-arrange/internal/orchestrator"
-	"github.com/wepie/ai-agent-arrange/pkg/logger"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/orchestrator"
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/logger"
 	"go.uber.org/zap"
 )
 

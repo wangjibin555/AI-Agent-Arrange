@@ -6,15 +6,25 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wepie/ai-agent-arrange/internal/agent"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/agent"
 )
+
+// TaskRepository defines the interface for task persistence
+type TaskRepository interface {
+	Create(task *Task) error
+	Update(task *Task) error
+	GetByID(id string) (*Task, error)
+	GetPendingTasks() ([]*Task, error)
+	GetRunningTasks() ([]*Task, error)
+}
 
 // TaskManager manages task lifecycle and persistence
 type TaskManager struct {
-	tasks            map[string]*Task    // taskID -> Task
+	tasks            map[string]*Task    // taskID -> Task (内存缓存)
 	agentTasks       map[string][]string // agentName -> []taskID (正在执行的任务列表)
 	pendingTasks     []string            // 待执行任务队列
 	registry         *agent.Registry     // Agent 注册中心
+	repository       TaskRepository      // 持久化存储（可选）
 	mu               sync.RWMutex
 	maxRetries       int
 	retryInterval    time.Duration
@@ -25,25 +35,100 @@ type TaskManager struct {
 
 // TaskManagerConfig contains configuration for TaskManager
 type TaskManagerConfig struct {
-	MaxRetries       int           // 最大重试次数
-	RetryInterval    time.Duration // 重试间隔
-	MaxPendingTasks  int           // 最大待执行任务数（0 = 无限制）
-	MaxTasksPerAgent int           // 单个 Agent 最大并发任务数（0 = 无限制）
+	MaxRetries       int            // 最大重试次数
+	RetryInterval    time.Duration  // 重试间隔
+	MaxPendingTasks  int            // 最大待执行任务数（0 = 无限制）
+	MaxTasksPerAgent int            // 单个 Agent 最大并发任务数（0 = 无限制）
+	Repository       TaskRepository // 可选的持久化存储
 }
 
 // NewTaskManager creates a new task manager
 func NewTaskManager(registry *agent.Registry, config TaskManagerConfig) *TaskManager {
-	return &TaskManager{
+	tm := &TaskManager{
 		tasks:            make(map[string]*Task),
 		agentTasks:       make(map[string][]string),
 		pendingTasks:     make([]string, 0),
 		registry:         registry,
+		repository:       config.Repository, // 可以为 nil（不持久化）
 		maxRetries:       config.MaxRetries,
 		retryInterval:    config.RetryInterval,
 		maxPendingTasks:  config.MaxPendingTasks,
 		maxTasksPerAgent: config.MaxTasksPerAgent,
 		notifyChan:       make(chan struct{}, 100), // 缓冲通道
 	}
+
+	// 如果配置了持久化，启动时恢复未完成的任务
+	if tm.repository != nil {
+		if err := tm.RecoverTasks(); err != nil {
+			// 记录错误但不中断启动
+			fmt.Printf("Warning: failed to recover tasks from database: %v\n", err)
+		}
+	}
+
+	return tm
+}
+
+// RecoverTasks recovers pending and running tasks from database on startup
+func (tm *TaskManager) RecoverTasks() error {
+	if tm.repository == nil {
+		return nil
+	}
+
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	// 1. 恢复 pending 任务
+	pendingTasks, err := tm.repository.GetPendingTasks()
+	if err != nil {
+		return fmt.Errorf("failed to recover pending tasks: %w", err)
+	}
+
+	for _, task := range pendingTasks {
+		tm.tasks[task.ID] = task
+		tm.pendingTasks = append(tm.pendingTasks, task.ID)
+	}
+
+	// 2. 恢复 running 任务（服务重启时需要重新执行）
+	runningTasks, err := tm.repository.GetRunningTasks()
+	if err != nil {
+		return fmt.Errorf("failed to recover running tasks: %w", err)
+	}
+
+	for _, task := range runningTasks {
+		// 将运行中的任务重置为 pending 状态（因为服务重启了）
+		task.Status = TaskStatusPending
+		task.StartedAt = nil
+		// 增加重试计数
+		*task.RetryCount++
+
+		// 检查是否超过最大重试次数
+		if *task.RetryCount >= tm.maxRetries {
+			task.Status = TaskStatusFailed
+			task.Error = "task interrupted by server restart, max retries exceeded"
+			now := time.Now()
+			task.CompletedAt = &now
+			// 更新数据库
+			if err := tm.repository.Update(task); err != nil {
+				return fmt.Errorf("failed to mark interrupted task as failed: %w", err)
+			}
+		} else {
+			// 更新数据库为 pending 状态
+			if err := tm.repository.Update(task); err != nil {
+				return fmt.Errorf("failed to reset running task to pending: %w", err)
+			}
+			// 加入待执行队列
+			tm.tasks[task.ID] = task
+			tm.pendingTasks = append(tm.pendingTasks, task.ID)
+		}
+	}
+
+	recoveredCount := len(pendingTasks) + len(runningTasks)
+	if recoveredCount > 0 {
+		fmt.Printf("Recovered %d tasks from database (%d pending, %d running)\n",
+			recoveredCount, len(pendingTasks), len(runningTasks))
+	}
+
+	return nil
 }
 
 // CreateTask creates and stores a new task
@@ -69,6 +154,14 @@ func (tm *TaskManager) CreateTask(task *Task) error {
 	task.Status = TaskStatusPending
 	task.CreatedAt = time.Now()
 
+	// 1. 持久化到数据库（如果配置了 repository）
+	if tm.repository != nil {
+		if err := tm.repository.Create(task); err != nil {
+			return fmt.Errorf("failed to persist task: %w", err)
+		}
+	}
+
+	// 2. 存入内存（快速访问）
 	tm.tasks[task.ID] = task
 	tm.pendingTasks = append(tm.pendingTasks, task.ID)
 
@@ -263,17 +356,30 @@ func (tm *TaskManager) GetAgentLoad(agentName string) int {
 	return len(tm.agentTasks[agentName])
 }
 
-// GetTask retrieves a task by ID
+// GetTask retrieves a task by ID (memory first, then database)
 func (tm *TaskManager) GetTask(taskID string) (*Task, error) {
 	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-
 	task, exists := tm.tasks[taskID]
-	if !exists {
-		return nil, fmt.Errorf("task %s not found", taskID)
+	tm.mu.RUnlock()
+
+	// 1. 先从内存中查找（快速）
+	if exists {
+		return task, nil
 	}
 
-	return task, nil
+	// 2. 内存中没有，从数据库中查找（降级）
+	if tm.repository != nil {
+		task, err := tm.repository.GetByID(taskID)
+		if err == nil {
+			// 找到了，加载到内存中
+			tm.mu.Lock()
+			tm.tasks[taskID] = task
+			tm.mu.Unlock()
+			return task, nil
+		}
+	}
+
+	return nil, fmt.Errorf("task %s not found", taskID)
 }
 
 // UpdateTaskStatus updates the status of a task
@@ -324,7 +430,7 @@ func (tm *TaskManager) MarkTaskAsRunning(taskID, agentName string) error {
 	return nil
 }
 
-// 标记任务已完成
+// MarkTaskAsCompleted marks a task as completed
 func (tm *TaskManager) MarkTaskAsCompleted(taskID, agentName string, result map[string]interface{}) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
@@ -339,7 +445,14 @@ func (tm *TaskManager) MarkTaskAsCompleted(taskID, agentName string, result map[
 	now := time.Now()
 	task.CompletedAt = &now
 
-	// 从 Agent 的任务列表中移除
+	// 1. 更新数据库
+	if tm.repository != nil {
+		if err := tm.repository.Update(task); err != nil {
+			return fmt.Errorf("failed to update task in database: %w", err)
+		}
+	}
+
+	// 2. 从 Agent 的任务列表中移除
 	tm.removeAgentTask(agentName, taskID)
 
 	return nil
@@ -367,6 +480,13 @@ func (tm *TaskManager) MarkTaskAsFailed(taskID, agentName string, errMsg string)
 		task.Status = TaskStatusPending
 		task.StartedAt = nil
 		tm.pendingTasks = append(tm.pendingTasks, taskID)
+
+		// 更新数据库（重试状态）
+		if tm.repository != nil {
+			if err := tm.repository.Update(task); err != nil {
+				return fmt.Errorf("failed to update task for retry: %w", err)
+			}
+		}
 		return nil
 	}
 
@@ -374,6 +494,13 @@ func (tm *TaskManager) MarkTaskAsFailed(taskID, agentName string, errMsg string)
 	task.Status = TaskStatusFailed
 	now := time.Now()
 	task.CompletedAt = &now
+
+	// 更新数据库（最终失败状态）
+	if tm.repository != nil {
+		if err := tm.repository.Update(task); err != nil {
+			return fmt.Errorf("failed to update failed task: %w", err)
+		}
+	}
 
 	return nil
 }

@@ -8,7 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/wepie/ai-agent-arrange/internal/orchestrator"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/orchestrator"
 )
 
 // 整体相当于一个处理工作任务创建的Service层

@@ -10,11 +10,12 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
-	"github.com/wepie/ai-agent-arrange/internal/agent"
-	"github.com/wepie/ai-agent-arrange/internal/api"
-	"github.com/wepie/ai-agent-arrange/internal/orchestrator"
-	"github.com/wepie/ai-agent-arrange/pkg/config"
-	"github.com/wepie/ai-agent-arrange/pkg/logger"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/agent"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/api"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/orchestrator"
+	mysqlStorage "github.com/wangjibin555/AI-Agent-Arrange/internal/storage/mysql"
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/config"
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/logger"
 	"go.uber.org/zap"
 )
 
@@ -64,6 +65,40 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	// Initialize MySQL database (optional - for task persistence)
+	var db *mysqlStorage.DB
+	var taskRepo orchestrator.TaskRepository
+	if shouldEnableMySQL() {
+		mysqlCfg := mysqlStorage.Config{
+			Host:     getEnv("MYSQL_HOST", "localhost"),
+			Port:     getEnvInt("MYSQL_PORT", 3306),
+			User:     getEnv("MYSQL_USER", "root"),
+			Password: getEnv("MYSQL_PASSWORD", ""),
+			Database: getEnv("MYSQL_DATABASE", "ai_agent_arrange"),
+		}
+
+		var dbErr error
+		db, dbErr = mysqlStorage.NewDB(mysqlCfg)
+		if dbErr != nil {
+			logger.Fatal("Failed to connect to MySQL", zap.Error(dbErr))
+		}
+		defer db.Close()
+
+		// Run migrations
+		if dbErr := db.Migrate(); dbErr != nil {
+			logger.Fatal("Failed to run database migrations", zap.Error(dbErr))
+		}
+
+		// Create task repository
+		taskRepo = mysqlStorage.NewTaskRepository(db)
+		logger.Info("✅ MySQL persistence enabled",
+			zap.String("host", mysqlCfg.Host),
+			zap.String("database", mysqlCfg.Database),
+		)
+	} else {
+		logger.Info("⚠️  MySQL persistence disabled (tasks stored in memory only)")
+	}
+
 	// Initialize agent registry
 	registry := agent.NewRegistry()
 	logger.Info("Agent registry initialized")
@@ -73,10 +108,11 @@ func main() {
 		logger.Fatal("Failed to register agents", zap.Error(err))
 	}
 
-	// Initialize orchestration engine
-	engine := orchestrator.NewEngine(registry, cfg.Orchestrator.MaxConcurrentTasks)
+	// Initialize orchestration engine with persistence
+	engine := orchestrator.NewEngineWithRepository(registry, cfg.Orchestrator.MaxConcurrentTasks, taskRepo)
 	logger.Info("Orchestration engine initialized",
 		zap.Int("max_workers", cfg.Orchestrator.MaxConcurrentTasks),
+		zap.Bool("persistence", taskRepo != nil),
 	)
 
 	// Start the engine
