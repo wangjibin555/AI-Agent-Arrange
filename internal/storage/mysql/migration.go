@@ -7,7 +7,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// Migrate runs database migrations
+// 数据库迁移
 func (db *DB) Migrate() error {
 	logger.Info("Running database migrations...")
 
