@@ -111,9 +111,10 @@ func (w *Worker) executeTask(ctx context.Context, task *Task) {
 
 	// Execute task
 	input := &agent.TaskInput{
-		TaskID:     task.ID,
-		Action:     task.Action,
-		Parameters: task.Parameters,
+		TaskID:         task.ID,
+		Action:         task.Action,
+		Parameters:     task.Parameters,
+		EventPublisher: w.taskManager.GetEventPublisher(), // 传递事件发布器
 	}
 
 	output, err := agentInstance.Execute(execCtx, input)

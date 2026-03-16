@@ -137,22 +137,66 @@ func (a *DeepSeekAgent) Execute(ctx context.Context, input *TaskInput) (*TaskOut
 		maxTokens = tokens
 	}
 
-	// 调用 DeepSeek API (兼容 OpenAI 格式)
+	// 调用 DeepSeek API (流式，兼容 OpenAI 格式)
 	req := openai.ChatCompletionRequest{
 		Model:       a.model,
 		Messages:    messages,
 		Temperature: temperature,
 		MaxTokens:   maxTokens,
+		Stream:      true, // 启用流式
 	}
 
-	resp, err := a.client.CreateChatCompletion(ctx, req)
+	stream, err := a.client.CreateChatCompletionStream(ctx, req)
 	if err != nil {
 		output.Error = fmt.Sprintf("DeepSeek API error: %v", err)
 		return output, err
 	}
+	defer stream.Close()
+
+	// 接收流式 Token
+	var fullResponse string
+	var finishReason string
+
+	for {
+		response, err := stream.Recv()
+		if err != nil {
+			// 流结束
+			break
+		}
+
+		if len(response.Choices) == 0 {
+			continue
+		}
+
+		// 获取 Token
+		delta := response.Choices[0].Delta.Content
+		if delta != "" {
+			fullResponse += delta
+
+			// 发布 Token 事件（实时推送）
+			if input.EventPublisher != nil {
+				input.EventPublisher.PublishTaskEvent(
+					input.TaskID,
+					"token_generated", // 事件类型
+					"running",
+					"",
+					map[string]interface{}{
+						"token": delta,
+						"text":  fullResponse, // 累积的完整文本
+					},
+					"",
+				)
+			}
+		}
+
+		// 记录完成原因
+		if response.Choices[0].FinishReason != "" {
+			finishReason = string(response.Choices[0].FinishReason)
+		}
+	}
 
 	// 检查响应
-	if len(resp.Choices) == 0 {
+	if fullResponse == "" {
 		output.Error = "no response from DeepSeek API"
 		return output, fmt.Errorf(output.Error)
 	}
@@ -160,14 +204,9 @@ func (a *DeepSeekAgent) Execute(ctx context.Context, input *TaskInput) (*TaskOut
 	// 构建成功响应
 	output.Success = true
 	output.Result = map[string]interface{}{
-		"text":          resp.Choices[0].Message.Content,
-		"model":         resp.Model,
-		"finish_reason": resp.Choices[0].FinishReason,
-		"usage": map[string]interface{}{
-			"prompt_tokens":     resp.Usage.PromptTokens,
-			"completion_tokens": resp.Usage.CompletionTokens,
-			"total_tokens":      resp.Usage.TotalTokens,
-		},
+		"text":          fullResponse,
+		"model":         a.model,
+		"finish_reason": finishReason,
 	}
 	output.Metadata["completed_at"] = time.Now().Format(time.RFC3339)
 

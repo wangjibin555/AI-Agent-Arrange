@@ -25,11 +25,17 @@ type Agent interface {
 
 // TaskInput represents the input data for an agent task
 type TaskInput struct {
-	TaskID       string                 `json:"task_id"`
-	Action       string                 `json:"action"`
-	Parameters   map[string]interface{} `json:"parameters"`
-	Context      map[string]interface{} `json:"context"`
-	ParentTaskID string                 `json:"parent_task_id,omitempty"`
+	TaskID         string                 `json:"task_id"`
+	Action         string                 `json:"action"`
+	Parameters     map[string]interface{} `json:"parameters"`
+	Context        map[string]interface{} `json:"context"`
+	ParentTaskID   string                 `json:"parent_task_id,omitempty"`
+	EventPublisher EventPublisher         `json:"-"` // For streaming token events
+}
+
+// EventPublisher defines the interface for publishing task events (token streaming, progress, etc.)
+type EventPublisher interface {
+	PublishTaskEvent(taskID string, eventType string, status string, message string, result map[string]interface{}, errorMsg string)
 }
 
 // TaskOutput represents the output from an agent task

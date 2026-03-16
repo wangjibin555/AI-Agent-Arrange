@@ -14,10 +14,11 @@ import (
 
 // Server represents the HTTP API server
 type Server struct {
-	engine *orchestrator.Engine
-	router *gin.Engine
-	server *http.Server
-	addr   string
+	engine       *orchestrator.Engine
+	router       *gin.Engine
+	server       *http.Server
+	addr         string
+	eventManager *EventStreamManager
 }
 
 // NewServer creates a new API server
@@ -39,9 +40,10 @@ func NewServer(engine *orchestrator.Engine, host string, port int, mode string) 
 	addr := fmt.Sprintf("%s:%d", host, port)
 
 	s := &Server{
-		engine: engine,
-		router: router,
-		addr:   addr,
+		engine:       engine,
+		router:       router,
+		addr:         addr,
+		eventManager: NewEventStreamManager(),
 		server: &http.Server{
 			Addr:    addr,
 			Handler: router,
@@ -78,7 +80,8 @@ func (s *Server) setupRoutes() {
 			tasks.POST("", s.handleCreateTask)
 			tasks.GET("/:id", s.handleGetTask)
 			tasks.GET("", s.handleListTasks)
-			tasks.DELETE("/:id", s.handleCancelTask) // Cancel task
+			tasks.DELETE("/:id", s.handleCancelTask)          // Cancel task
+			tasks.GET("/:id/stream", s.handleTaskEventStream) // SSE stream
 		}
 
 		// Smart task with auto agent selection
@@ -106,6 +109,11 @@ func (s *Server) Start() error {
 func (s *Server) Stop(ctx context.Context) error {
 	logger.Info("Stopping HTTP server")
 	return s.server.Shutdown(ctx)
+}
+
+// GetEventPublisher returns the event publisher for external integration
+func (s *Server) GetEventPublisher() *EventPublisher {
+	return NewEventPublisher(s.eventManager)
 }
 
 // LoggerMiddleware creates a Gin middleware for logging

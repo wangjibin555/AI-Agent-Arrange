@@ -231,6 +231,11 @@ func (e *Engine) GetTask(taskID string) (*Task, error) {
 	return e.taskManager.GetTask(taskID)
 }
 
+// SetEventPublisher sets the event publisher for task events
+func (e *Engine) SetEventPublisher(publisher TaskEventPublisher) {
+	e.taskManager.eventPublisher = publisher
+}
+
 // EngineStatus represents the current status of the engine
 type EngineStatus struct {
 	Running     bool `json:"running"`

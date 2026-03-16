@@ -340,6 +340,86 @@ func (s *Server) handleCancelTask(c *gin.Context) {
 	})
 }
 
+// handleTaskEventStream handles SSE streaming for task events
+func (s *Server) handleTaskEventStream(c *gin.Context) {
+	taskID := c.Param("id")
+
+	// Check if task exists
+	task, err := s.engine.GetTask(taskID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, Response{
+			Success: false,
+			Error:   fmt.Sprintf("Task not found: %s", taskID),
+		})
+		return
+	}
+
+	// Set SSE headers
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no") // Disable nginx buffering
+
+	// Generate client ID
+	clientID := fmt.Sprintf("client-%d", time.Now().UnixNano())
+
+	// Subscribe to task events
+	eventChannel := s.eventManager.Subscribe(taskID, clientID)
+	defer s.eventManager.Unsubscribe(taskID, clientID)
+
+	// Send initial task state
+	initialEvent := TaskEvent{
+		Type:      "connected",
+		TaskID:    taskID,
+		Status:    string(task.Status),
+		Message:   "Connected to task event stream",
+		Timestamp: time.Now(),
+	}
+	fmt.Fprint(c.Writer, FormatSSE(initialEvent))
+	c.Writer.Flush()
+
+	// Set up heartbeat ticker
+	heartbeatTicker := time.NewTicker(15 * time.Second)
+	defer heartbeatTicker.Stop()
+
+	// Set up timeout for completed tasks
+	timeoutTimer := time.NewTimer(5 * time.Minute)
+	defer timeoutTimer.Stop()
+
+	// Stream events
+	for {
+		select {
+		case event, ok := <-eventChannel.Channel:
+			if !ok {
+				// Channel closed
+				return
+			}
+
+			// Send event to client
+			fmt.Fprint(c.Writer, FormatSSE(event))
+			c.Writer.Flush()
+
+			// Close connection if task is finished
+			if event.Type == "completed" || event.Type == "failed" || event.Type == "cancelled" {
+				return
+			}
+
+		case <-heartbeatTicker.C:
+			// Send heartbeat comment to keep connection alive
+			fmt.Fprintf(c.Writer, ": heartbeat\n\n")
+			c.Writer.Flush()
+
+		case <-timeoutTimer.C:
+			// Timeout - close connection
+			return
+
+		case <-c.Request.Context().Done():
+			// Client disconnected
+			return
+		}
+	}
+}
+
 // convertTaskToResponse converts a Task to TaskResponse
 func convertTaskToResponse(task *orchestrator.Task) *TaskResponse {
 	return &TaskResponse{

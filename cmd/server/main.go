@@ -122,6 +122,12 @@ func main() {
 
 	// Initialize HTTP server
 	httpServer := api.NewServer(engine, cfg.Server.Host, cfg.Server.Port, cfg.Server.Mode)
+
+	// Setup event publisher for real-time task updates
+	eventPublisher := httpServer.GetEventPublisher()
+	engine.SetEventPublisher(eventPublisher)
+	logger.Info("Event publisher configured for real-time task updates")
+
 	if err := httpServer.Start(); err != nil {
 		logger.Fatal("Failed to start HTTP server", zap.Error(err))
 	}
@@ -133,6 +139,7 @@ func main() {
 	fmt.Println("📡 API endpoints:")
 	fmt.Println("   - Health check: GET /health")
 	fmt.Println("   - Create task:  POST /api/v1/tasks")
+	fmt.Println("   - Task stream:  GET /api/v1/tasks/:id/stream (SSE)")
 	fmt.Println("   - Engine status: GET /api/v1/status")
 	fmt.Println("\nPress Ctrl+C to stop\n")
 

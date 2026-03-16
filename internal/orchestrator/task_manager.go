@@ -18,6 +18,11 @@ type TaskRepository interface {
 	GetRunningTasks() ([]*Task, error)
 }
 
+// TaskEventPublisher defines the interface for publishing task events
+type TaskEventPublisher interface {
+	PublishTaskEvent(taskID string, eventType string, status string, message string, result map[string]interface{}, errorMsg string)
+}
+
 // TaskManager manages task lifecycle and persistence
 type TaskManager struct {
 	tasks            map[string]*Task    // taskID -> Task (内存缓存)
@@ -25,6 +30,7 @@ type TaskManager struct {
 	pendingTasks     []string            // 待执行任务队列
 	registry         *agent.Registry     // Agent 注册中心
 	repository       TaskRepository      // 持久化存储（可选）
+	eventPublisher   TaskEventPublisher  // 事件发布器（可选）
 	mu               sync.RWMutex
 	maxRetries       int
 	retryInterval    time.Duration
@@ -35,11 +41,12 @@ type TaskManager struct {
 
 // TaskManagerConfig contains configuration for TaskManager
 type TaskManagerConfig struct {
-	MaxRetries       int            // 最大重试次数
-	RetryInterval    time.Duration  // 重试间隔
-	MaxPendingTasks  int            // 最大待执行任务数（0 = 无限制）
-	MaxTasksPerAgent int            // 单个 Agent 最大并发任务数（0 = 无限制）
-	Repository       TaskRepository // 可选的持久化存储
+	MaxRetries       int                // 最大重试次数
+	RetryInterval    time.Duration      // 重试间隔
+	MaxPendingTasks  int                // 最大待执行任务数（0 = 无限制）
+	MaxTasksPerAgent int                // 单个 Agent 最大并发任务数（0 = 无限制）
+	Repository       TaskRepository     // 可选的持久化存储
+	EventPublisher   TaskEventPublisher // 可选的事件发布器
 }
 
 // NewTaskManager creates a new task manager
@@ -49,7 +56,8 @@ func NewTaskManager(registry *agent.Registry, config TaskManagerConfig) *TaskMan
 		agentTasks:       make(map[string][]string),
 		pendingTasks:     make([]string, 0),
 		registry:         registry,
-		repository:       config.Repository, // 可以为 nil（不持久化）
+		repository:       config.Repository,     // 可以为 nil（不持久化）
+		eventPublisher:   config.EventPublisher, // 可以为 nil（不发布事件）
 		maxRetries:       config.MaxRetries,
 		retryInterval:    config.RetryInterval,
 		maxPendingTasks:  config.MaxPendingTasks,
@@ -208,6 +216,18 @@ func (tm *TaskManager) PullNextTask(ctx context.Context) (*Task, error) {
 	task.Status = TaskStatusRunning
 	now := time.Now()
 	task.StartedAt = &now
+
+	// 发布任务开始事件
+	if tm.eventPublisher != nil {
+		tm.eventPublisher.PublishTaskEvent(
+			task.ID,
+			"status_changed",
+			string(TaskStatusRunning),
+			fmt.Sprintf("Task started on agent %s", task.AgentName),
+			nil,
+			"",
+		)
+	}
 
 	// 记录到 Agent 任务列表
 	tm.agentTasks[task.AgentName] = append(tm.agentTasks[task.AgentName], task.ID)
@@ -452,7 +472,19 @@ func (tm *TaskManager) MarkTaskAsCompleted(taskID, agentName string, result map[
 		}
 	}
 
-	// 2. 从 Agent 的任务列表中移除
+	// 2. 发布完成事件
+	if tm.eventPublisher != nil {
+		tm.eventPublisher.PublishTaskEvent(
+			taskID,
+			"completed",
+			string(TaskStatusCompleted),
+			"Task completed successfully",
+			result,
+			"",
+		)
+	}
+
+	// 3. 从 Agent 的任务列表中移除
 	tm.removeAgentTask(agentName, taskID)
 
 	return nil
@@ -500,6 +532,18 @@ func (tm *TaskManager) MarkTaskAsFailed(taskID, agentName string, errMsg string)
 		if err := tm.repository.Update(task); err != nil {
 			return fmt.Errorf("failed to update failed task: %w", err)
 		}
+	}
+
+	// 发布失败事件
+	if tm.eventPublisher != nil {
+		tm.eventPublisher.PublishTaskEvent(
+			taskID,
+			"failed",
+			string(TaskStatusFailed),
+			fmt.Sprintf("Task failed after %d retries", *task.RetryCount),
+			nil,
+			errMsg,
+		)
 	}
 
 	return nil
@@ -666,7 +710,7 @@ func (tm *TaskManager) GetStaleTasks(timeout time.Duration) []*Task {
 	return staleTasks
 }
 
-// 标记任务为取消状态
+// CancelTask marks a task as cancelled
 func (tm *TaskManager) CancelTask(taskID string) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
@@ -683,6 +727,25 @@ func (tm *TaskManager) CancelTask(taskID string) error {
 	task.Status = TaskStatusCancelled
 	now := time.Now()
 	task.CompletedAt = &now
+
+	// 更新数据库
+	if tm.repository != nil {
+		if err := tm.repository.Update(task); err != nil {
+			return fmt.Errorf("failed to update cancelled task: %w", err)
+		}
+	}
+
+	// 发布取消事件
+	if tm.eventPublisher != nil {
+		tm.eventPublisher.PublishTaskEvent(
+			taskID,
+			"cancelled",
+			string(TaskStatusCancelled),
+			"Task cancelled by user",
+			nil,
+			"",
+		)
+	}
 
 	// 从待执行队列中移除
 	tm.removePendingTask(taskID)
@@ -719,6 +782,11 @@ func (tm *TaskManager) removeAgentTask(agentName, taskID string) {
 	if len(tm.agentTasks[agentName]) == 0 {
 		delete(tm.agentTasks, agentName)
 	}
+}
+
+// GetEventPublisher returns the event publisher for streaming events
+func (tm *TaskManager) GetEventPublisher() TaskEventPublisher {
+	return tm.eventPublisher
 }
 
 // TaskStats 当前任务统计信息（只包含统计数据）
