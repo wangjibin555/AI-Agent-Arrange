@@ -14,6 +14,8 @@ import (
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/api"
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/orchestrator"
 	mysqlStorage "github.com/wangjibin555/AI-Agent-Arrange/internal/storage/mysql"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/tool"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/tool/builtin"
 	"github.com/wangjibin555/AI-Agent-Arrange/pkg/config"
 	"github.com/wangjibin555/AI-Agent-Arrange/pkg/logger"
 	"go.uber.org/zap"
@@ -99,12 +101,21 @@ func main() {
 		logger.Info("⚠️  MySQL persistence disabled (tasks stored in memory only)")
 	}
 
+	// Initialize global tool registry (shared by all agents)
+	globalToolRegistry := tool.NewRegistry()
+	if err := builtin.RegisterAllBuiltinTools(globalToolRegistry); err != nil {
+		logger.Fatal("Failed to register tools", zap.Error(err))
+	}
+	logger.Info("Tool registry initialized",
+		zap.Int("tool_count", globalToolRegistry.Count()),
+	)
+
 	// Initialize agent registry
 	registry := agent.NewRegistry()
 	logger.Info("Agent registry initialized")
 
-	// Register agents
-	if err := registerAgents(registry); err != nil {
+	// Register agents with global tool registry
+	if err := registerAgents(registry, globalToolRegistry); err != nil {
 		logger.Fatal("Failed to register agents", zap.Error(err))
 	}
 
@@ -201,20 +212,20 @@ func initLogger(cfg *config.Config) error {
 }
 
 // registerAgents registers all agents (Echo, OpenAI, DeepSeek)
-func registerAgents(registry *agent.Registry) error {
+func registerAgents(registry *agent.Registry, toolRegistry *tool.Registry) error {
 	// 1. Register EchoAgents for testing
 	if err := registerEchoAgents(registry); err != nil {
 		return err
 	}
 
-	// 2. Register OpenAI Agent (for complex tasks)
-	if err := registerOpenAIAgents(registry); err != nil {
+	// 2. Register OpenAI Agent (for complex tasks) with global tool registry
+	if err := registerOpenAIAgents(registry, toolRegistry); err != nil {
 		logger.Warn("Failed to register OpenAI agents", zap.Error(err))
 		// 不中断启动，允许没有 OpenAI API Key 的情况
 	}
 
-	// 3. Register DeepSeek Agent (for lightweight tasks)
-	if err := registerDeepSeekAgents(registry); err != nil {
+	// 3. Register DeepSeek Agent (for lightweight tasks) with global tool registry
+	if err := registerDeepSeekAgents(registry, toolRegistry); err != nil {
 		logger.Warn("Failed to register DeepSeek agents", zap.Error(err))
 		// 不中断启动，允许没有 DeepSeek API Key 的情况
 	}
@@ -276,7 +287,7 @@ func registerEchoAgents(registry *agent.Registry) error {
 }
 
 // registerOpenAIAgents registers OpenAI agents for complex tasks
-func registerOpenAIAgents(registry *agent.Registry) error {
+func registerOpenAIAgents(registry *agent.Registry, toolRegistry *tool.Registry) error {
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" || apiKey == "your-openai-api-key-here" {
 		return fmt.Errorf("OPENAI_API_KEY not set in environment")
@@ -289,6 +300,9 @@ func registerOpenAIAgents(registry *agent.Registry) error {
 
 	// Create OpenAI agent
 	openaiAgent := agent.NewOpenAIAgent("openai-gpt-agent", apiKey)
+
+	// 将工具注册表设置到Agent
+	openaiAgent.SetToolRegistry(toolRegistry)
 
 	// Configure agent
 	config := &agent.Config{
@@ -330,7 +344,7 @@ func registerOpenAIAgents(registry *agent.Registry) error {
 }
 
 // registerDeepSeekAgents registers DeepSeek agents for lightweight tasks
-func registerDeepSeekAgents(registry *agent.Registry) error {
+func registerDeepSeekAgents(registry *agent.Registry, toolRegistry *tool.Registry) error {
 	apiKey := os.Getenv("DEEPSEEK_API_KEY")
 	if apiKey == "" || apiKey == "your-deepseek-api-key-here" {
 		return fmt.Errorf("DEEPSEEK_API_KEY not set in environment")
@@ -343,6 +357,9 @@ func registerDeepSeekAgents(registry *agent.Registry) error {
 
 	// Create DeepSeek agent
 	deepseekAgent := agent.NewDeepSeekAgent("deepseek-chat-agent", apiKey)
+
+	// 将工具注册表设置到Agent
+	deepseekAgent.SetToolRegistry(toolRegistry)
 
 	// Configure agent
 	config := &agent.Config{

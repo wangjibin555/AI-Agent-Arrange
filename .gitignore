@@ -26,6 +26,12 @@ scripts/
 # Docs
 docs/
 
+# Test
+examples/
+
+# Backup
+*.backup
+
 # Environment variables
 .env
 .env.local
@@ -55,6 +61,8 @@ configs/secrets.yaml
 cmd/server/server
 cmd/agent/agent
 cmd/cli/cli
+server  # Binary in root directory
+*.exe   # Windows executables
 
 # Database
 *.db
