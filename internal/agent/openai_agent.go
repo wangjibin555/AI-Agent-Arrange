@@ -116,7 +116,7 @@ func (a *OpenAIAgent) Execute(ctx context.Context, input *TaskInput) (*TaskOutpu
 	prompt, ok := input.Parameters["prompt"].(string)
 	if !ok || prompt == "" {
 		output.Error = "missing required parameter: prompt"
-		return output, fmt.Errorf(output.Error)
+		return output, fmt.Errorf("%s", output.Error)
 	}
 
 	// 构建消息列表
@@ -302,74 +302,24 @@ func (a *OpenAIAgent) Execute(ctx context.Context, input *TaskInput) (*TaskOutpu
 			return output, nil
 		}
 
-		// 执行所有工具调用
-		for _, toolCall := range toolCalls {
-			// 发布工具调用事件
-			if input.EventPublisher != nil {
-				input.EventPublisher.PublishTaskEvent(
-					input.TaskID,
-					"tool_call_started",
-					"running",
-					"",
-					map[string]interface{}{
-						"tool_name": toolCall.Function.Name,
-						"arguments": toolCall.Function.Arguments,
-					},
-					"",
-				)
-			}
+		// 并发执行所有工具调用
+		toolResults := a.executeToolCallsConcurrently(ctx, toolCalls, input)
 
-			// 执行工具
-			toolResult, err := a.executeToolCall(ctx, toolCall)
-
+		// 按原始顺序处理结果（保持消息顺序）
+		for _, result := range toolResults {
 			// 记录工具调用历史
 			toolCallHistory = append(toolCallHistory, map[string]interface{}{
-				"tool_name": toolCall.Function.Name,
-				"arguments": toolCall.Function.Arguments,
-				"result":    toolResult,
-				"error":     err,
+				"tool_name": result.ToolCall.Function.Name,
+				"arguments": result.ToolCall.Function.Arguments,
+				"result":    result.Result,
+				"error":     result.Error,
 			})
-
-			// 发布工具调用完成事件
-			if input.EventPublisher != nil {
-				resultData := map[string]interface{}{
-					"tool_name": toolCall.Function.Name,
-					"success":   err == nil,
-				}
-				if err != nil {
-					resultData["error"] = err.Error()
-				} else {
-					resultData["result"] = toolResult
-				}
-				input.EventPublisher.PublishTaskEvent(
-					input.TaskID,
-					"tool_call_completed",
-					"running",
-					"",
-					resultData,
-					"",
-				)
-			}
-
-			// 构建工具结果消息（使用结构化错误信息）
-			var toolResultContent string
-			if err != nil {
-				// 如果是 ToolError，提供详细的错误信息给 LLM
-				if toolErr, ok := err.(*tool.ToolError); ok {
-					toolResultContent = toolErr.ToLLMMessage()
-				} else {
-					toolResultContent = fmt.Sprintf("Error: %v", err)
-				}
-			} else {
-				resultBytes, _ := json.Marshal(toolResult)
-				toolResultContent = string(resultBytes)
-			}
 
 			// 添加工具结果到对话历史
 			messages = append(messages, openai.ChatCompletionMessage{
 				Role:       openai.ChatMessageRoleTool,
-				Content:    toolResultContent,
-				ToolCallID: toolCall.ID,
+				Content:    result.ResultContent,
+				ToolCallID: result.ToolCall.ID,
 			})
 		}
 	}
@@ -378,7 +328,7 @@ func (a *OpenAIAgent) Execute(ctx context.Context, input *TaskInput) (*TaskOutpu
 	output.Error = "exceeded maximum iterations for tool calling"
 	output.Metadata["completed_at"] = time.Now().Format(time.RFC3339)
 	output.Metadata["iterations"] = maxIterations
-	return output, fmt.Errorf(output.Error)
+	return output, fmt.Errorf("%s", output.Error)
 }
 
 // convertToolsToOpenAIFormat converts internal tool definitions to OpenAI format
@@ -429,6 +379,110 @@ func (a *OpenAIAgent) convertToolsToOpenAIFormat() []openai.Tool {
 	}
 
 	return openaiTools
+}
+
+// toolCallResult holds the result of a tool call execution
+type toolCallResult struct {
+	Index         int                    // Original index in toolCalls array
+	ToolCall      openai.ToolCall        // Original tool call
+	Result        map[string]interface{} // Execution result
+	Error         error                  // Execution error
+	ResultContent string                 // Formatted result for LLM
+}
+
+// executeToolCallsConcurrently executes multiple tool calls concurrently
+func (a *OpenAIAgent) executeToolCallsConcurrently(ctx context.Context, toolCalls []openai.ToolCall, input *TaskInput) []*toolCallResult {
+	if len(toolCalls) == 0 {
+		return nil
+	}
+
+	// Create result channel with buffer
+	resultChan := make(chan *toolCallResult, len(toolCalls))
+
+	// Execute all tools concurrently
+	for i, toolCall := range toolCalls {
+		go func(index int, tc openai.ToolCall) {
+			result := &toolCallResult{
+				Index:    index,
+				ToolCall: tc,
+			}
+
+			// Panic recovery
+			defer func() {
+				if r := recover(); r != nil {
+					result.Error = fmt.Errorf("tool execution panicked: %v", r)
+					result.ResultContent = fmt.Sprintf("Error: Tool execution panicked: %v", r)
+					resultChan <- result
+				}
+			}()
+
+			// Publish start event
+			if input.EventPublisher != nil {
+				input.EventPublisher.PublishTaskEvent(
+					input.TaskID,
+					"tool_call_started",
+					"running",
+					"",
+					map[string]interface{}{
+						"tool_name": tc.Function.Name,
+						"arguments": tc.Function.Arguments,
+						"index":     index,
+					},
+					"",
+				)
+			}
+
+			// Execute tool
+			toolResult, err := a.executeToolCall(ctx, tc)
+			result.Result = toolResult
+			result.Error = err
+
+			// Format result content for LLM
+			if err != nil {
+				if toolErr, ok := err.(*tool.ToolError); ok {
+					result.ResultContent = toolErr.ToLLMMessage()
+				} else {
+					result.ResultContent = fmt.Sprintf("Error: %v", err)
+				}
+			} else {
+				resultBytes, _ := json.Marshal(toolResult)
+				result.ResultContent = string(resultBytes)
+			}
+
+			// Publish completion event
+			if input.EventPublisher != nil {
+				resultData := map[string]interface{}{
+					"tool_name": tc.Function.Name,
+					"success":   err == nil,
+					"index":     index,
+				}
+				if err != nil {
+					resultData["error"] = err.Error()
+				} else {
+					resultData["result"] = toolResult
+				}
+				input.EventPublisher.PublishTaskEvent(
+					input.TaskID,
+					"tool_call_completed",
+					"running",
+					"",
+					resultData,
+					"",
+				)
+			}
+
+			resultChan <- result
+		}(i, toolCall)
+	}
+
+	// Collect all results
+	results := make([]*toolCallResult, len(toolCalls))
+	for i := 0; i < len(toolCalls); i++ {
+		result := <-resultChan
+		results[result.Index] = result // Maintain original order
+	}
+
+	return results
 }
 
 // executeToolCall executes a single tool call with comprehensive error handling

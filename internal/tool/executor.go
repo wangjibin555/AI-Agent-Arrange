@@ -68,6 +68,17 @@ func (e *Executor) Execute(ctx context.Context, toolName string, params map[stri
 		errChan := make(chan error, 1)
 
 		go func() {
+			// Panic recovery to prevent tool panics from crashing the agent
+			defer func() {
+				if r := recover(); r != nil {
+					errChan <- ErrExecutionFailed(
+						toolName,
+						fmt.Sprintf("tool execution panicked: %v", r),
+						fmt.Errorf("panic: %v", r),
+					)
+				}
+			}()
+
 			result, err := toolInstance.Execute(execCtx, params)
 			if err != nil {
 				errChan <- err
