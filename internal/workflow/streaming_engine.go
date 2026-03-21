@@ -13,11 +13,10 @@ import (
 
 // StreamingEngine 扩展Engine，增加流式执行能力
 type StreamingEngine struct {
-	*Engine                               // 嵌入原有引擎
-	buffers      map[string]*StreamBuffer // stepID -> 缓冲区
-	bufferOwners map[string]string        // stepID -> executionID
-	buffersMu    sync.RWMutex             // 缓冲区锁
-	enabled      bool                     // 是否启用流式功能
+	*Engine                                       // 嵌入原有引擎
+	buffers   map[string]map[string]*StreamBuffer // executionID -> stepID -> 缓冲区
+	buffersMu sync.RWMutex                        // 缓冲区锁
+	enabled   bool                                // 是否启用流式功能
 }
 
 // agentEventPublisherAdapter 适配器：将workflow.EventPublisher适配为agent.EventPublisher
@@ -46,10 +45,9 @@ func NewStreamingEngine(config EngineConfig) *StreamingEngine {
 	baseEngine := NewEngine(config)
 
 	return &StreamingEngine{
-		Engine:       baseEngine,
-		buffers:      make(map[string]*StreamBuffer),
-		bufferOwners: make(map[string]string),
-		enabled:      true,
+		Engine:  baseEngine,                                // 复用基础工作流执行能力，流式引擎是在其上扩展流式调度
+		buffers: make(map[string]map[string]*StreamBuffer), // 运行中的流式步骤输出缓冲区：executionID -> stepID -> buffer
+		enabled: true,                                      // 当前实例启用流式能力
 	}
 }
 
@@ -156,7 +154,7 @@ func (e *StreamingEngine) executeWorkflowStreamingWithState(
 		// 获取所有依赖的缓冲区
 		buffers := make(map[string]*StreamBuffer)
 		for _, depID := range step.DependsOn {
-			if buffer := e.getBuffer(depID); buffer != nil {
+			if buffer := e.getBuffer(execution.ID, depID); buffer != nil {
 				buffers[depID] = buffer
 			}
 		}
@@ -213,7 +211,7 @@ func (e *StreamingEngine) executeWorkflowStreamingWithState(
 					if len(step.DependsOn) > 0 {
 						buffers := make(map[string]*StreamBuffer)
 						for _, depID := range step.DependsOn {
-							if buffer := e.getBuffer(depID); buffer != nil {
+							if buffer := e.getBuffer(execution.ID, depID); buffer != nil {
 								buffers[depID] = buffer
 							}
 						}
@@ -763,7 +761,7 @@ func (e *StreamingEngine) subscribeToUpstream(ctx context.Context, step *Step, e
 	initialDataChannels := make(map[string]chan struct{})
 
 	for _, depID := range step.DependsOn {
-		depBuffer := e.getBuffer(depID)
+		depBuffer := e.getBuffer(execution.ID, depID)
 		if depBuffer == nil {
 			continue
 		}
@@ -785,14 +783,19 @@ func (e *StreamingEngine) subscribeToUpstream(ctx context.Context, step *Step, e
 			initialDataReceived := false
 
 			for chunk := range sub.Channel {
-				// 将上游数据传递给当前步骤的上下文
+				// 上游步骤一旦完成，最终输出会写回 execution.Context。
+				// 这里忽略完成后的 replay/尾部 chunk，避免旧的 partial 数据覆盖最终输出。
 				e.mu.Lock()
-				if execution.Context.Outputs[depStepID] == nil {
-					execution.Context.Outputs[depStepID] = make(map[string]interface{})
-				}
-				// 累积部分数据
-				for k, v := range chunk.Data {
-					execution.Context.Outputs[depStepID][k] = v
+				stepExec := execution.StepExecutions[depStepID]
+				stepCompleted := stepExec != nil && stepExec.Status == WorkflowStatusCompleted
+				if !stepCompleted {
+					if execution.Context.Outputs[depStepID] == nil {
+						execution.Context.Outputs[depStepID] = make(map[string]interface{})
+					}
+					// 累积部分数据
+					for k, v := range chunk.Data {
+						execution.Context.Outputs[depStepID][k] = v
+					}
 				}
 				e.mu.Unlock()
 
@@ -849,23 +852,39 @@ func (e *StreamingEngine) estimateTokens(data map[string]interface{}) int {
 func (e *StreamingEngine) registerBuffer(executionID, stepID string, buffer *StreamBuffer) {
 	e.buffersMu.Lock()
 	defer e.buffersMu.Unlock()
-	e.buffers[stepID] = buffer
-	e.bufferOwners[stepID] = executionID
+
+	if e.buffers[executionID] == nil {
+		e.buffers[executionID] = make(map[string]*StreamBuffer)
+	}
+	e.buffers[executionID][stepID] = buffer
 }
 
 // unregisterBuffer 注销缓冲区
-func (e *StreamingEngine) unregisterBuffer(stepID string) {
+func (e *StreamingEngine) unregisterBuffer(executionID, stepID string) {
 	e.buffersMu.Lock()
 	defer e.buffersMu.Unlock()
-	delete(e.buffers, stepID)
-	delete(e.bufferOwners, stepID)
+
+	executionBuffers := e.buffers[executionID]
+	if executionBuffers == nil {
+		return
+	}
+
+	delete(executionBuffers, stepID)
+	if len(executionBuffers) == 0 {
+		delete(e.buffers, executionID)
+	}
 }
 
 // getBuffer 获取缓冲区
-func (e *StreamingEngine) getBuffer(stepID string) *StreamBuffer {
+func (e *StreamingEngine) getBuffer(executionID, stepID string) *StreamBuffer {
 	e.buffersMu.RLock()
 	defer e.buffersMu.RUnlock()
-	return e.buffers[stepID]
+
+	executionBuffers := e.buffers[executionID]
+	if executionBuffers == nil {
+		return nil
+	}
+	return executionBuffers[stepID]
 }
 
 // cleanupBuffers 清理所有缓冲区
@@ -873,14 +892,10 @@ func (e *StreamingEngine) cleanupBuffers(executionID string) {
 	e.buffersMu.Lock()
 	defer e.buffersMu.Unlock()
 
-	for stepID, buffer := range e.buffers {
-		if e.bufferOwners[stepID] != executionID {
-			continue
-		}
+	for _, buffer := range e.buffers[executionID] {
 		buffer.MarkComplete()
-		delete(e.buffers, stepID)
-		delete(e.bufferOwners, stepID)
 	}
+	delete(e.buffers, executionID)
 }
 
 // GetStreamingStatus 获取流式执行状态
@@ -890,8 +905,9 @@ func (e *StreamingEngine) GetStreamingStatus(executionID string) map[string]inte
 
 	status := make(map[string]interface{})
 	bufferStatus := make([]map[string]interface{}, 0)
+	executionBuffers := e.buffers[executionID]
 
-	for stepID, buffer := range e.buffers {
+	for stepID, buffer := range executionBuffers {
 		bufferStatus = append(bufferStatus, map[string]interface{}{
 			"step_id":          stepID,
 			"total_tokens":     buffer.TotalTokens(),
@@ -902,7 +918,7 @@ func (e *StreamingEngine) GetStreamingStatus(executionID string) map[string]inte
 	}
 
 	status["buffers"] = bufferStatus
-	status["buffer_count"] = len(e.buffers)
+	status["buffer_count"] = len(executionBuffers)
 
 	return status
 }

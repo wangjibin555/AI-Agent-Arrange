@@ -133,7 +133,7 @@ func (e *StreamingEngine) rollbackWorkflow(ctx context.Context, execution *Workf
 		"Starting workflow rollback", nil)
 
 	for stepID := range completedSteps {
-		buffer := e.getBuffer(stepID)
+		buffer := e.getBuffer(execution.ID, stepID)
 		if !e.restoreFromCheckpoint(execution, stepID, buffer) {
 			execution.Context.RemoveStepOutput(stepID)
 		}
@@ -208,11 +208,14 @@ func (e *StreamingEngine) rollbackStreamingWorkflow(
 				map[string]interface{}{"step_id": step.ID, "error": err.Error()})
 		}
 
-		buffer := e.getBuffer(step.ID)
+		buffer := e.getBuffer(execution.ID, step.ID)
 		if buffer != nil {
 			buffer.TruncateAfter(-1)
 		}
 		execution.Context.RemoveStepOutput(step.ID)
+		if step.OutputAlias != "" {
+			execution.Context.DeleteVariable(step.OutputAlias)
+		}
 		execution.Context.DeleteVariable(step.ID + "_partial")
 	}
 

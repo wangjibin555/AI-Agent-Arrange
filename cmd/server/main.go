@@ -152,7 +152,7 @@ func main() {
 	fmt.Println("   - Create task:  POST /api/v1/tasks")
 	fmt.Println("   - Task stream:  GET /api/v1/tasks/:id/stream (SSE)")
 	fmt.Println("   - Engine status: GET /api/v1/status")
-	fmt.Println("\nPress Ctrl+C to stop\n")
+	fmt.Println("\nPress Ctrl+C to stop")
 
 	// Wait for interrupt signal
 	<-sigChan
