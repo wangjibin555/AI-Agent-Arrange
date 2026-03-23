@@ -87,6 +87,9 @@ func (e *StreamingEngine) saveStreamingCheckpoint(
 	buffer *StreamBuffer,
 	explicitOutput map[string]interface{},
 ) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	if execution.Checkpoints == nil {
 		execution.Checkpoints = make(map[string]*StreamCheckpoint)
 	}
@@ -111,7 +114,9 @@ func (e *StreamingEngine) restoreFromCheckpoint(
 	stepID string,
 	buffer *StreamBuffer,
 ) bool {
+	e.mu.RLock()
 	checkpoint := execution.Checkpoints[stepID]
+	e.mu.RUnlock()
 	if checkpoint == nil {
 		return false
 	}

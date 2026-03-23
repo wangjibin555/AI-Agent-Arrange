@@ -66,13 +66,14 @@ func (e *StreamingEngine) Execute(ctx context.Context, workflow *Workflow, varia
 
 	// 创建执行上下文
 	execution := &WorkflowExecution{
-		ID:             uuid.New().String(),
-		WorkflowID:     workflow.ID,
-		Status:         WorkflowStatusRunning,
-		StepExecutions: make(map[string]*StepExecution),
-		Context:        NewExecutionContext(variables),
-		Checkpoints:    make(map[string]*StreamCheckpoint),
-		StartedAt:      time.Now(),
+		ID:              uuid.New().String(),
+		WorkflowID:      workflow.ID,
+		Status:          WorkflowStatusRunning,
+		StepExecutions:  make(map[string]*StepExecution),
+		Context:         NewExecutionContext(variables),
+		Checkpoints:     make(map[string]*StreamCheckpoint),
+		RouteSelections: make(map[string]string),
+		StartedAt:       time.Now(),
 	}
 
 	// 初始化workflow变量
@@ -204,6 +205,33 @@ func (e *StreamingEngine) executeWorkflowStreamingWithState(
 					mu.Unlock()
 
 					if isRunning || isCompleted {
+						continue
+					}
+
+					decision, reason, err := e.evaluateStepDecision(workflow, step, execution, completedSteps, failedSteps)
+					//节点Route失败，表示当前节点无法被触发，进行报错，并且按失败路径进行处理
+					if err != nil {
+						mu.Lock()
+						failedSteps[step.ID] = true
+						mu.Unlock()
+						e.failStep(&StepExecution{
+							StepID:    step.ID,
+							Status:    WorkflowStatusRunning,
+							StartedAt: time.Now(),
+						}, execution, fmt.Errorf("failed to evaluate step decision: %w", err))
+						continue
+					}
+					//节点等待，还不能触发
+					if decision == StepDecisionWait {
+						continue
+					}
+					//节点跳过，则标记为已经触发
+					if decision == StepDecisionSkip {
+						mu.Lock()
+						completedSteps[step.ID] = true
+						mu.Unlock()
+						e.skipStep(step, execution, reason)
+						trigger.MarkTriggered()
 						continue
 					}
 
@@ -561,6 +589,15 @@ func (e *StreamingEngine) completeStreamingStep(
 	if step.OutputAlias != "" {
 		execution.Context.SetVariable(step.OutputAlias, result)
 	}
+	e.notifyExecutionContextChange(execution)
+	if step.Route != nil {
+		selectedRoute, targets, err := e.applyRouteSelection(step, execution)
+		if err != nil {
+			return e.failStep(stepExec, execution, fmt.Errorf("failed to apply route selection: %w", err))
+		}
+		stepExec.Metadata["route"] = selectedRoute
+		stepExec.Metadata["route_targets"] = targets
+	}
 
 	e.publishEvent(execution.ID, eventType, string(WorkflowStatusCompleted), message, map[string]interface{}{
 		"step_id":      step.ID,
@@ -588,6 +625,7 @@ func (e *StreamingEngine) completeStreamingStepWithPartialData(
 	partialResult["_partial"] = true
 	partialResult["_partial_error"] = cause.Error()
 	execution.Context.SetVariable(step.ID+"_partial", true)
+	e.notifyExecutionContextChange(execution)
 
 	return e.completeStreamingStep(
 		step,
@@ -754,9 +792,6 @@ func (e *StreamingEngine) subscribeToUpstream(ctx context.Context, step *Step, e
 		return nil
 	}
 
-	// 创建ContextReader用于通知
-	contextReader := e.newExecutionContextReader(execution).(*executionContextReader)
-
 	// 为每个依赖创建初始数据通知channel
 	initialDataChannels := make(map[string]chan struct{})
 
@@ -799,8 +834,8 @@ func (e *StreamingEngine) subscribeToUpstream(ctx context.Context, step *Step, e
 				}
 				e.mu.Unlock()
 
-				// 通知ContextReader数据变更
-				contextReader.notifyContextChange()
+				// 通知等待中的 ContextReader 重新检查字段
+				e.notifyExecutionContextChange(execution)
 
 				// 第一次收到数据时通知主流程
 				if !initialDataReceived {
@@ -926,7 +961,7 @@ func (e *StreamingEngine) GetStreamingStatus(executionID string) map[string]inte
 // executionContextReader 实现ContextReader接口，提供线程安全的Context访问
 type executionContextReader struct {
 	execution *WorkflowExecution
-	engine    *StreamingEngine
+	mu        *sync.RWMutex
 	cond      *sync.Cond // 条件变量，用于数据变更通知
 }
 
@@ -934,15 +969,15 @@ type executionContextReader struct {
 func (e *StreamingEngine) newExecutionContextReader(execution *WorkflowExecution) agent.ContextReader {
 	return &executionContextReader{
 		execution: execution,
-		engine:    e,
-		cond:      sync.NewCond(&e.mu),
+		mu:        &e.mu,
+		cond:      e.getExecutionNotifier(execution),
 	}
 }
 
 // GetStepOutput 获取步骤输出（返回副本，线程安全）
 func (r *executionContextReader) GetStepOutput(stepID string) (map[string]interface{}, bool) {
-	r.engine.mu.RLock()
-	defer r.engine.mu.RUnlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
 	output, exists := r.execution.Context.Outputs[stepID]
 	if !exists || output == nil {
@@ -955,8 +990,8 @@ func (r *executionContextReader) GetStepOutput(stepID string) (map[string]interf
 
 // GetVariable 获取全局变量
 func (r *executionContextReader) GetVariable(key string) (interface{}, bool) {
-	r.engine.mu.RLock()
-	defer r.engine.mu.RUnlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
 	value, exists := r.execution.Context.Variables[key]
 	return value, exists
@@ -964,8 +999,8 @@ func (r *executionContextReader) GetVariable(key string) (interface{}, bool) {
 
 // GetField 获取嵌套字段，支持路径如 "result.summary"
 func (r *executionContextReader) GetField(stepID string, fieldPath string) (interface{}, bool) {
-	r.engine.mu.RLock()
-	defer r.engine.mu.RUnlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
 	output, exists := r.execution.Context.Outputs[stepID]
 	if !exists || output == nil {
@@ -983,10 +1018,10 @@ func (r *executionContextReader) WaitForField(stepID string, fieldPath string, t
 
 	for {
 		// 先尝试获取字段
-		r.engine.mu.RLock()
+		r.mu.RLock()
 		output := r.execution.Context.Outputs[stepID]
 		stepExec := r.execution.StepExecutions[stepID]
-		r.engine.mu.RUnlock()
+		r.mu.RUnlock()
 
 		// 检查字段是否存在
 		if output != nil {
@@ -1034,8 +1069,8 @@ func (r *executionContextReader) WaitForField(stepID string, fieldPath string, t
 
 // IsStepCompleted 检查步骤是否已完成
 func (r *executionContextReader) IsStepCompleted(stepID string) bool {
-	r.engine.mu.RLock()
-	defer r.engine.mu.RUnlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
 	stepExec, exists := r.execution.StepExecutions[stepID]
 	if !exists {

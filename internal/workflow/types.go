@@ -1,6 +1,9 @@
 package workflow
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // WorkflowStatus represents the status of a workflow execution
 type WorkflowStatus string
@@ -11,6 +14,7 @@ const (
 	WorkflowStatusCompleted WorkflowStatus = "completed"
 	WorkflowStatusFailed    WorkflowStatus = "failed"
 	WorkflowStatusCancelled WorkflowStatus = "cancelled"
+	WorkflowStatusSkipped   WorkflowStatus = "skipped"
 )
 
 // Workflow 表示完整的工作流定义
@@ -36,6 +40,7 @@ type Step struct {
 	Parameters         map[string]interface{} `json:"params,omitempty" yaml:"params,omitempty"`                           // 步骤参数（可使用模板）
 	DependsOn          []string               `json:"depends_on,omitempty" yaml:"depends_on,omitempty"`                   // 此步骤依赖的步骤ID列表
 	Condition          *Condition             `json:"condition,omitempty" yaml:"condition,omitempty"`                     // 条件执行规则
+	Route              *RouteConfig           `json:"route,omitempty" yaml:"route,omitempty"`                             // 动态路由配置
 	Timeout            *time.Duration         `json:"timeout,omitempty" yaml:"timeout,omitempty"`                         // 步骤超时时间
 	Retries            int                    `json:"retries,omitempty" yaml:"retries,omitempty"`                         // 失败时的重试次数
 	OnFailure          *StepFailurePolicy     `json:"on_failure,omitempty" yaml:"on_failure,omitempty"`                   // 失败时的处理策略
@@ -51,6 +56,13 @@ type Condition struct {
 	Type       ConditionType `json:"type" yaml:"type"`                                 // 条件类型（表达式、状态等）
 	Expression string        `json:"expression,omitempty" yaml:"expression,omitempty"` // 条件表达式（例如："{{step1.result.value}} > 10"）
 	Status     string        `json:"status,omitempty" yaml:"status,omitempty"`         // 依赖步骤所需的状态
+}
+
+// RouteConfig 定义步骤完成后的动态路由规则
+type RouteConfig struct {
+	Expression string              `json:"expression" yaml:"expression"`               // 路由表达式，渲染结果作为 case key
+	Cases      map[string][]string `json:"cases,omitempty" yaml:"cases,omitempty"`     // route key -> 激活的下游步骤ID
+	Default    []string            `json:"default,omitempty" yaml:"default,omitempty"` // 未命中任何 case 时默认激活的步骤
 }
 
 // ConditionType represents the type of condition
@@ -122,17 +134,19 @@ const (
 
 // WorkflowExecution represents a running or completed workflow instance
 type WorkflowExecution struct {
-	ID             string                       `json:"id"`
-	WorkflowID     string                       `json:"workflow_id"`
-	Status         WorkflowStatus               `json:"status"`
-	CurrentStep    string                       `json:"current_step,omitempty"`
-	StepExecutions map[string]*StepExecution    `json:"step_executions"` // stepID -> execution details
-	Context        *ExecutionContext            `json:"context"`         // Workflow execution context
-	Checkpoints    map[string]*StreamCheckpoint `json:"checkpoints,omitempty"`
-	ResumeState    *ExecutionResumeState        `json:"resume_state,omitempty"`
-	Error          string                       `json:"error,omitempty"`
-	StartedAt      time.Time                    `json:"started_at"`
-	CompletedAt    *time.Time                   `json:"completed_at,omitempty"`
+	ID              string                       `json:"id"`
+	WorkflowID      string                       `json:"workflow_id"`
+	Status          WorkflowStatus               `json:"status"`
+	CurrentStep     string                       `json:"current_step,omitempty"`
+	StepExecutions  map[string]*StepExecution    `json:"step_executions"` // stepID -> execution details
+	Context         *ExecutionContext            `json:"context"`         // Workflow execution context
+	Checkpoints     map[string]*StreamCheckpoint `json:"checkpoints,omitempty"`
+	ResumeState     *ExecutionResumeState        `json:"resume_state,omitempty"`
+	RouteSelections map[string]string            `json:"route_selections,omitempty"` // router stepID -> selected route key
+	Error           string                       `json:"error,omitempty"`
+	StartedAt       time.Time                    `json:"started_at"`
+	CompletedAt     *time.Time                   `json:"completed_at,omitempty"`
+	notifier        *sync.Cond                   `json:"-"`
 }
 
 // StepExecution represents the execution status of a single step
