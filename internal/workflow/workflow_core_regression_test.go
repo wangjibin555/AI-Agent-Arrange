@@ -372,6 +372,153 @@ steps:
 		}
 	})
 
+	t.Run("foreach_step_fan_out_and_aggregate_results", func(t *testing.T) {
+		engine, _ := newTestEngine(t, nil)
+
+		workflowDef := &Workflow{
+			ID:   "wf-core-foreach",
+			Name: "Core Foreach",
+			Steps: []*Step{
+				{
+					ID:        "extract_users",
+					AgentName: "test-agent",
+					Action:    "return_result",
+					Parameters: map[string]interface{}{
+						"result": map[string]interface{}{
+							"users": []interface{}{
+								map[string]interface{}{"id": "u1"},
+								map[string]interface{}{"id": "u2"},
+								map[string]interface{}{"id": "u3"},
+							},
+						},
+					},
+				},
+				{
+					ID:        "enrich_user",
+					AgentName: "test-agent",
+					Action:    "echo_value",
+					DependsOn: []string{"extract_users"},
+					Foreach: &ForeachConfig{
+						From:        "{{extract_users.result.users}}",
+						ItemAs:      "user",
+						IndexAs:     "user_index",
+						MaxParallel: 2,
+					},
+					Parameters: map[string]interface{}{
+						"value": "{{user.id}}",
+						"index": "{{user_index}}",
+					},
+				},
+			},
+		}
+
+		execution, err := engine.Execute(context.Background(), workflowDef, nil)
+		if err != nil {
+			t.Fatalf("execute workflow: %v", err)
+		}
+
+		exec, err := waitForBaseExecution(engine, execution.ID)
+		if err != nil {
+			t.Fatalf("wait for execution: %v", err)
+		}
+		if exec.Status != WorkflowStatusCompleted {
+			t.Fatalf("expected completed workflow, got %s (%s)", exec.Status, exec.Error)
+		}
+
+		enrichExec := exec.StepExecutions["enrich_user"]
+		if enrichExec == nil {
+			t.Fatalf("missing enrich_user execution")
+		}
+		if got := enrichExec.Result["count"]; got != 3 {
+			t.Fatalf("expected foreach result count 3, got %v", got)
+		}
+
+		items, ok := enrichExec.Result["items"].([]map[string]interface{})
+		if !ok {
+			t.Fatalf("expected foreach items slice, got %#v", enrichExec.Result["items"])
+		}
+		if len(items) != 3 {
+			t.Fatalf("expected 3 foreach items, got %d", len(items))
+		}
+		if items[0]["value"] != "u1" || items[1]["value"] != "u2" || items[2]["value"] != "u3" {
+			t.Fatalf("unexpected foreach values: %+v", items)
+		}
+	})
+
+	t.Run("fan_in_step_can_consume_foreach_items_array", func(t *testing.T) {
+		engine, _ := newTestEngine(t, nil)
+
+		workflowDef := &Workflow{
+			ID:   "wf-core-fan-in",
+			Name: "Core Fan In",
+			Steps: []*Step{
+				{
+					ID:        "extract_users",
+					AgentName: "test-agent",
+					Action:    "return_result",
+					Parameters: map[string]interface{}{
+						"result": map[string]interface{}{
+							"users": []interface{}{
+								map[string]interface{}{"id": "u1"},
+								map[string]interface{}{"id": "u2"},
+								map[string]interface{}{"id": "u3"},
+							},
+						},
+					},
+				},
+				{
+					ID:        "enrich_user",
+					AgentName: "test-agent",
+					Action:    "echo_value",
+					DependsOn: []string{"extract_users"},
+					Foreach: &ForeachConfig{
+						From:        "{{extract_users.result.users}}",
+						ItemAs:      "user",
+						IndexAs:     "user_index",
+						MaxParallel: 2,
+					},
+					Parameters: map[string]interface{}{
+						"value": "{{user.id}}",
+						"index": "{{user_index}}",
+					},
+				},
+				{
+					ID:        "aggregate_profiles",
+					AgentName: "test-agent",
+					Action:    "collect_item_values",
+					DependsOn: []string{"enrich_user"},
+					Parameters: map[string]interface{}{
+						"items": "{{enrich_user.result.items}}",
+					},
+				},
+			},
+		}
+
+		execution, err := engine.Execute(context.Background(), workflowDef, nil)
+		if err != nil {
+			t.Fatalf("execute workflow: %v", err)
+		}
+
+		exec, err := waitForBaseExecution(engine, execution.ID)
+		if err != nil {
+			t.Fatalf("wait for execution: %v", err)
+		}
+		if exec.Status != WorkflowStatusCompleted {
+			t.Fatalf("expected completed workflow, got %s (%s)", exec.Status, exec.Error)
+		}
+
+		aggregateExec := exec.StepExecutions["aggregate_profiles"]
+		if aggregateExec == nil {
+			t.Fatalf("missing aggregate_profiles execution")
+		}
+		if aggregateExec.Result["count"] != 3 {
+			t.Fatalf("expected fan-in count 3, got %+v", aggregateExec.Result)
+		}
+		if aggregateExec.Result["joined"] != "u1+u2+u3" {
+			t.Fatalf("unexpected fan-in joined result: %+v", aggregateExec.Result)
+		}
+	})
+
 	t.Run("invalid_route_configuration_fails_fast", func(t *testing.T) {
 		parser := NewParser()
 

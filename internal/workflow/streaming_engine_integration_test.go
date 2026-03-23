@@ -89,6 +89,12 @@ func (a *integrationTestAgent) Execute(ctx context.Context, input *agent.TaskInp
 	switch input.Action {
 	case "stream_text":
 		return a.executeStreamText(ctx, input)
+	case "return_result":
+		return a.executeReturnResult(input)
+	case "echo_value":
+		return a.executeEchoValue(input)
+	case "collect_item_values":
+		return a.executeCollectItemValues(input)
 	case "delayed_stream_text":
 		return a.executeDelayedStreamText(ctx, input)
 	case "stream_then_fail":
@@ -156,6 +162,64 @@ func (a *integrationTestAgent) executeDelayedStreamText(ctx context.Context, inp
 		}
 	}
 	return a.executeStreamText(ctx, input)
+}
+
+func (a *integrationTestAgent) executeReturnResult(input *agent.TaskInput) (*agent.TaskOutput, error) {
+	result, _ := input.Parameters["result"].(map[string]interface{})
+	if result == nil {
+		result = make(map[string]interface{})
+	}
+
+	return &agent.TaskOutput{
+		TaskID:  input.TaskID,
+		Success: true,
+		Result:  copyMap(result),
+	}, nil
+}
+
+func (a *integrationTestAgent) executeEchoValue(input *agent.TaskInput) (*agent.TaskOutput, error) {
+	return &agent.TaskOutput{
+		TaskID:  input.TaskID,
+		Success: true,
+		Result: map[string]interface{}{
+			"value": input.Parameters["value"],
+			"index": input.Parameters["index"],
+		},
+	}, nil
+}
+
+func (a *integrationTestAgent) executeCollectItemValues(input *agent.TaskInput) (*agent.TaskOutput, error) {
+	rawItems, ok := input.Parameters["items"]
+	if !ok {
+		return nil, fmt.Errorf("missing items parameter")
+	}
+
+	values := make([]string, 0)
+	switch items := rawItems.(type) {
+	case []interface{}:
+		for _, item := range items {
+			entry, ok := item.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("invalid item type: %T", item)
+			}
+			values = append(values, fmt.Sprint(entry["value"]))
+		}
+	case []map[string]interface{}:
+		for _, entry := range items {
+			values = append(values, fmt.Sprint(entry["value"]))
+		}
+	default:
+		return nil, fmt.Errorf("items must be array, got %T", rawItems)
+	}
+
+	return &agent.TaskOutput{
+		TaskID:  input.TaskID,
+		Success: true,
+		Result: map[string]interface{}{
+			"joined": strings.Join(values, "+"),
+			"count":  len(values),
+		},
+	}, nil
 }
 
 func (a *integrationTestAgent) executeStreamThenFail(ctx context.Context, input *agent.TaskInput) (*agent.TaskOutput, error) {

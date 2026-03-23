@@ -136,6 +136,9 @@ func (p *Parser) validate(wf *Workflow) error {
 		if err := p.validateRoute(step, stepMap); err != nil {
 			return err
 		}
+		if err := p.validateForeach(step); err != nil {
+			return err
+		}
 	}
 
 	p.collectConditionalBranchWarnings(wf)
@@ -198,6 +201,25 @@ func (p *Parser) validateRoute(step *Step, stepMap map[string]*Step) error {
 		return err
 	}
 
+	return nil
+}
+
+func (p *Parser) validateForeach(step *Step) error {
+	if step.Foreach == nil {
+		return nil
+	}
+	if step.Foreach.From == "" {
+		return fmt.Errorf("step %s: foreach.from is required", step.ID)
+	}
+	if step.Foreach.ItemAs != "" && step.Foreach.IndexAs != "" && step.Foreach.ItemAs == step.Foreach.IndexAs {
+		return fmt.Errorf("step %s: foreach.item_as and foreach.index_as must be different", step.ID)
+	}
+	if step.Foreach.MaxParallel < 0 {
+		return fmt.Errorf("step %s: foreach.max_parallel must be >= 0", step.ID)
+	}
+	if step.Streaming != nil && step.Streaming.Enabled {
+		return fmt.Errorf("step %s: foreach does not support streaming.enabled yet", step.ID)
+	}
 	return nil
 }
 

@@ -41,6 +41,7 @@ type Step struct {
 	DependsOn          []string               `json:"depends_on,omitempty" yaml:"depends_on,omitempty"`                   // 此步骤依赖的步骤ID列表
 	Condition          *Condition             `json:"condition,omitempty" yaml:"condition,omitempty"`                     // 条件执行规则
 	Route              *RouteConfig           `json:"route,omitempty" yaml:"route,omitempty"`                             // 动态路由配置
+	Foreach            *ForeachConfig         `json:"foreach,omitempty" yaml:"foreach,omitempty"`                         // foreach / fan-out 配置
 	Timeout            *time.Duration         `json:"timeout,omitempty" yaml:"timeout,omitempty"`                         // 步骤超时时间
 	Retries            int                    `json:"retries,omitempty" yaml:"retries,omitempty"`                         // 失败时的重试次数
 	OnFailure          *StepFailurePolicy     `json:"on_failure,omitempty" yaml:"on_failure,omitempty"`                   // 失败时的处理策略
@@ -63,6 +64,14 @@ type RouteConfig struct {
 	Expression string              `json:"expression" yaml:"expression"`               // 路由表达式，渲染结果作为 case key
 	Cases      map[string][]string `json:"cases,omitempty" yaml:"cases,omitempty"`     // route key -> 激活的下游步骤ID
 	Default    []string            `json:"default,omitempty" yaml:"default,omitempty"` // 未命中任何 case 时默认激活的步骤
+}
+
+// ForeachConfig 定义步骤内部的 fan-out / 批处理展开语义
+type ForeachConfig struct {
+	From        string `json:"from" yaml:"from"`                                     // 数组来源表达式
+	ItemAs      string `json:"item_as,omitempty" yaml:"item_as,omitempty"`           // 当前 item 注入到模板中的变量名
+	IndexAs     string `json:"index_as,omitempty" yaml:"index_as,omitempty"`         // 当前 item 索引注入到模板中的变量名
+	MaxParallel int    `json:"max_parallel,omitempty" yaml:"max_parallel,omitempty"` // foreach 内部最大并发度
 }
 
 // ConditionType represents the type of condition

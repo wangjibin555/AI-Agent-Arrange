@@ -389,6 +389,10 @@ func (e *Engine) executeStep(ctx context.Context, step *Step, execution *Workflo
 	e.publishEvent(execution.ID, "step_started", string(WorkflowStatusRunning),
 		fmt.Sprintf("Step %s started", step.ID), map[string]interface{}{"step_id": step.ID})
 
+	if step.Foreach != nil {
+		return e.executeForeachStep(ctx, step, execution, stepExec)
+	}
+
 	// Render step parameters with template engine
 	engine := NewTemplateEngine(execution.Context)
 	renderedParams, err := engine.RenderParameters(step.Parameters)
@@ -485,6 +489,220 @@ func (e *Engine) executeStep(ctx context.Context, step *Step, execution *Workflo
 
 	// All retries failed
 	return e.failStep(stepExec, execution, lastErr)
+}
+
+func (e *Engine) executeForeachStep(
+	ctx context.Context,
+	step *Step,
+	execution *WorkflowExecution,
+	stepExec *StepExecution,
+) error {
+	items, err := e.resolveForeachItems(step, execution)
+	if err != nil {
+		return e.failStep(stepExec, execution, fmt.Errorf("failed to resolve foreach items: %w", err))
+	}
+
+	maxRetries := step.Retries
+	if maxRetries == 0 {
+		maxRetries = 1
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			stepExec.RetryCount++
+			e.publishEvent(execution.ID, "step_retry", string(WorkflowStatusRunning),
+				fmt.Sprintf("Retrying step %s (attempt %d/%d)", step.ID, attempt+1, maxRetries),
+				map[string]interface{}{"step_id": step.ID, "retry_count": attempt})
+		}
+
+		results, err := e.executeForeachItems(ctx, step, execution, items)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		aggregated := map[string]interface{}{
+			"items": results,
+			"count": len(results),
+		}
+
+		stepExec.Result = aggregated
+		stepExec.Status = WorkflowStatusCompleted
+		now := time.Now()
+		stepExec.CompletedAt = &now
+
+		execution.Context.SetStepOutput(step.ID, aggregated)
+		if step.OutputAlias != "" {
+			execution.Context.SetVariable(step.OutputAlias, aggregated)
+		}
+		e.notifyExecutionContextChange(execution)
+
+		if step.Route != nil {
+			selectedRoute, targets, err := e.applyRouteSelection(step, execution)
+			if err != nil {
+				return e.failStep(stepExec, execution, fmt.Errorf("failed to apply route selection: %w", err))
+			}
+			stepExec.Metadata["route"] = selectedRoute
+			stepExec.Metadata["route_targets"] = targets
+		}
+
+		e.publishEvent(execution.ID, "step_completed", string(WorkflowStatusCompleted),
+			fmt.Sprintf("Step %s completed successfully", step.ID),
+			map[string]interface{}{
+				"step_id":    step.ID,
+				"result":     aggregated,
+				"item_count": len(results),
+				"foreach":    true,
+			})
+
+		return nil
+	}
+
+	return e.failStep(stepExec, execution, lastErr)
+}
+
+func (e *Engine) resolveForeachItems(step *Step, execution *WorkflowExecution) ([]interface{}, error) {
+	templateEngine := NewTemplateEngine(execution.Context)
+	resolved, err := templateEngine.ResolveValue(step.Foreach.From)
+	if err != nil {
+		return nil, err
+	}
+
+	switch items := resolved.(type) {
+	case []interface{}:
+		return items, nil
+	case []string:
+		out := make([]interface{}, len(items))
+		for i, item := range items {
+			out[i] = item
+		}
+		return out, nil
+	case []map[string]interface{}:
+		out := make([]interface{}, len(items))
+		for i, item := range items {
+			out[i] = item
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("foreach.from must resolve to an array, got %T", resolved)
+	}
+}
+
+func (e *Engine) executeForeachItems(
+	ctx context.Context,
+	step *Step,
+	execution *WorkflowExecution,
+	items []interface{},
+) ([]map[string]interface{}, error) {
+	results := make([]map[string]interface{}, len(items))
+	maxParallel := step.Foreach.MaxParallel
+	if maxParallel <= 0 {
+		maxParallel = e.maxConcurrency
+		if maxParallel <= 0 {
+			maxParallel = 1
+		}
+	}
+
+	semaphore := make(chan struct{}, maxParallel)
+	errCh := make(chan error, len(items))
+	var wg sync.WaitGroup
+
+	for idx, item := range items {
+		wg.Add(1)
+		semaphore <- struct{}{}
+
+		go func(itemIndex int, currentItem interface{}) {
+			defer wg.Done()
+			defer func() { <-semaphore }()
+
+			result, err := e.executeForeachItem(ctx, step, execution, itemIndex, currentItem)
+			if err != nil {
+				errCh <- fmt.Errorf("foreach item %d failed: %w", itemIndex, err)
+				return
+			}
+			results[itemIndex] = result
+		}(idx, item)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	if len(errCh) > 0 {
+		return nil, <-errCh
+	}
+	return results, nil
+}
+
+func (e *Engine) executeForeachItem(
+	ctx context.Context,
+	step *Step,
+	execution *WorkflowExecution,
+	itemIndex int,
+	item interface{},
+) (map[string]interface{}, error) {
+	localCtx := cloneExecutionContext(execution.Context)
+	itemVar := step.Foreach.ItemAs
+	if itemVar == "" {
+		itemVar = "item"
+	}
+	indexVar := step.Foreach.IndexAs
+	if indexVar == "" {
+		indexVar = "index"
+	}
+	localCtx.SetVariable(itemVar, item)
+	localCtx.SetVariable(indexVar, itemIndex)
+
+	templateEngine := NewTemplateEngine(localCtx)
+	renderedParams, err := templateEngine.RenderParameters(step.Parameters)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render foreach item parameters: %w", err)
+	}
+
+	taskInput := &agent.TaskInput{
+		TaskID:        uuid.New().String(),
+		Action:        step.Action,
+		Parameters:    renderedParams,
+		Context:       make(map[string]interface{}),
+		ContextReader: e.newExecutionContextReader(execution),
+	}
+
+	ag, err := e.agentRegistry.Get(step.AgentName)
+	if err != nil {
+		return nil, fmt.Errorf("agent not found: %s", step.AgentName)
+	}
+
+	stepCtx := ctx
+	if step.Timeout != nil {
+		var cancel context.CancelFunc
+		stepCtx, cancel = context.WithTimeout(ctx, *step.Timeout)
+		defer cancel()
+	}
+
+	output, err := ag.Execute(stepCtx, taskInput)
+	if err != nil {
+		return nil, err
+	}
+	if !output.Success {
+		return nil, fmt.Errorf("step execution failed: %s", output.Error)
+	}
+
+	if output.Result == nil {
+		output.Result = make(map[string]interface{})
+	}
+	output.Result["_item_index"] = itemIndex
+	return output.Result, nil
+}
+
+func cloneExecutionContext(src *ExecutionContext) *ExecutionContext {
+	clone := NewExecutionContext(nil)
+	for key, value := range src.Variables {
+		clone.Variables[key] = value
+	}
+	for stepID, output := range src.Outputs {
+		clone.Outputs[stepID] = copyMap(output)
+	}
+	return clone
 }
 
 func (e *Engine) applyRouteSelection(step *Step, execution *WorkflowExecution) (string, []string, error) {

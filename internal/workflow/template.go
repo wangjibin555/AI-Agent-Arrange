@@ -12,6 +12,8 @@ type TemplateEngine struct {
 	context *ExecutionContext
 }
 
+var templateExprRE = regexp.MustCompile(`\{\{([^}]+)\}\}`)
+
 // NewTemplateEngine creates a new template engine
 func NewTemplateEngine(ctx *ExecutionContext) *TemplateEngine {
 	return &TemplateEngine{
@@ -26,10 +28,8 @@ func NewTemplateEngine(ctx *ExecutionContext) *TemplateEngine {
 //   - {{step_id.result}} - entire step result
 func (te *TemplateEngine) Render(template string) (string, error) {
 	// 正则表达式匹配所有 {{...}}
-	re := regexp.MustCompile(`\{\{([^}]+)\}\}`)
-
 	result := template
-	matches := re.FindAllStringSubmatch(template, -1)
+	matches := templateExprRE.FindAllStringSubmatch(template, -1)
 
 	for _, match := range matches {
 		if len(match) < 2 {
@@ -54,6 +54,16 @@ func (te *TemplateEngine) Render(template string) (string, error) {
 	return result, nil
 }
 
+// ResolveValue resolves a template expression to its raw value without converting it to string.
+// Supports either a wrapped expression like "{{step.result.items}}" or a plain expression string.
+func (te *TemplateEngine) ResolveValue(expression string) (interface{}, error) {
+	expr := strings.TrimSpace(expression)
+	if strings.HasPrefix(expr, "{{") && strings.HasSuffix(expr, "}}") {
+		expr = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(expr, "{{"), "}}"))
+	}
+	return te.evaluateExpression(expr)
+}
+
 // RenderParameters renders all parameters in a map
 func (te *TemplateEngine) RenderParameters(params map[string]interface{}) (map[string]interface{}, error) {
 	result := make(map[string]interface{})
@@ -73,6 +83,9 @@ func (te *TemplateEngine) RenderParameters(params map[string]interface{}) (map[s
 func (te *TemplateEngine) renderValue(value interface{}) (interface{}, error) {
 	switch v := value.(type) {
 	case string:
+		if match := templateExprRE.FindStringSubmatch(strings.TrimSpace(v)); len(match) == 2 && strings.TrimSpace(v) == match[0] {
+			return te.ResolveValue(v)
+		}
 		return te.Render(v)
 
 	case map[string]interface{}:
@@ -120,6 +133,11 @@ func (te *TemplateEngine) evaluateExpression(expr string) (interface{}, error) {
 		return "", fmt.Errorf("variable not found: %s", varName)
 	}
 
+	// Case 1.1: Nested global variable access (e.g. "user.id")
+	if value, exists := te.context.GetVariable(parts[0]); exists {
+		return navigateValue(value, parts[1:], expr)
+	}
+
 	// Case 2: Step output reference (e.g., "step1.result.field")
 	if len(parts) >= 2 {
 		stepID := parts[0]
@@ -139,25 +157,31 @@ func (te *TemplateEngine) evaluateExpression(expr string) (interface{}, error) {
 			return output, nil
 		}
 
-		// Navigate nested structure
-		current := interface{}(output)
-		for _, part := range parts[startIndex:] {
-			switch v := current.(type) {
-			case map[string]interface{}:
-				if val, ok := v[part]; ok {
-					current = val
-				} else {
-					return "", fmt.Errorf("field not found: %s in %s", part, expr)
-				}
-			default:
-				return "", fmt.Errorf("cannot access field %s: not a map", part)
-			}
-		}
-
-		return current, nil
+		return navigateValue(output, parts[startIndex:], expr)
 	}
 
 	return "", fmt.Errorf("invalid expression: %s", expr)
+}
+
+func navigateValue(current interface{}, parts []string, expr string) (interface{}, error) {
+	if len(parts) == 0 {
+		return current, nil
+	}
+
+	for _, part := range parts {
+		switch v := current.(type) {
+		case map[string]interface{}:
+			if val, ok := v[part]; ok {
+				current = val
+			} else {
+				return "", fmt.Errorf("field not found: %s in %s", part, expr)
+			}
+		default:
+			return "", fmt.Errorf("cannot access field %s: not a map", part)
+		}
+	}
+
+	return current, nil
 }
 
 // valueToString converts a value to its string representation
