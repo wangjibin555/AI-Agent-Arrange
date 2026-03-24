@@ -8,21 +8,28 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/orchestrator"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/workflow"
 	"github.com/wangjibin555/AI-Agent-Arrange/pkg/logger"
 	"go.uber.org/zap"
 )
 
 // Server represents the HTTP API server
 type Server struct {
-	engine       *orchestrator.Engine
-	router       *gin.Engine
-	server       *http.Server
-	addr         string
-	eventManager *EventStreamManager
+	engine           *orchestrator.Engine
+	executionService *orchestrator.ExecutionService
+	router           *gin.Engine
+	server           *http.Server
+	addr             string
+	eventManager     *EventStreamManager
 }
 
 // NewServer creates a new API server
 func NewServer(engine *orchestrator.Engine, host string, port int, mode string) *Server {
+	return NewServerWithWorkflow(engine, nil, host, port, mode)
+}
+
+// NewServerWithWorkflow creates a new API server with unified execution support.
+func NewServerWithWorkflow(engine *orchestrator.Engine, workflowEngine workflowRunner, host string, port int, mode string) *Server {
 	// Set Gin mode
 	if mode == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -40,10 +47,11 @@ func NewServer(engine *orchestrator.Engine, host string, port int, mode string) 
 	addr := fmt.Sprintf("%s:%d", host, port)
 
 	s := &Server{
-		engine:       engine,
-		router:       router,
-		addr:         addr,
-		eventManager: NewEventStreamManager(),
+		engine:           engine,
+		executionService: orchestrator.NewExecutionService(engine, workflowEngine),
+		router:           router,
+		addr:             addr,
+		eventManager:     NewEventStreamManager(),
 		server: &http.Server{
 			Addr:    addr,
 			Handler: router,
@@ -84,12 +92,31 @@ func (s *Server) setupRoutes() {
 			tasks.GET("/:id/stream", s.handleTaskEventStream) // SSE stream
 		}
 
+		// Unified execution APIs
+		executions := v1.Group("/executions")
+		{
+			executions.GET("/:id", s.handleGetExecution)
+			executions.DELETE("/:id", s.handleCancelExecution)
+			executions.GET("/:id/stream", s.handleExecutionEventStream)
+		}
+
+		workflows := v1.Group("/workflows")
+		{
+			workflows.POST("/execute", s.handleExecuteWorkflow)
+		}
+
 		// Smart task with auto agent selection
 		v1.POST("/smart-task", s.handleCreateSmartTask)
 
 		// Engine status
 		v1.GET("/status", s.handleEngineStatus)
 	}
+}
+
+type workflowRunner interface {
+	Execute(ctx context.Context, workflow *workflow.Workflow, variables map[string]interface{}) (*workflow.WorkflowExecution, error)
+	GetExecution(executionID string) (*workflow.WorkflowExecution, error)
+	CancelExecution(executionID string) error
 }
 
 // Start starts the HTTP server
@@ -111,9 +138,9 @@ func (s *Server) Stop(ctx context.Context) error {
 	return s.server.Shutdown(ctx)
 }
 
-// GetEventPublisher returns the event publisher for external integration
-func (s *Server) GetEventPublisher() *EventPublisher {
-	return NewEventPublisher(s.eventManager)
+// GetEventPublisher returns the unified event publisher for external integration.
+func (s *Server) GetEventPublisher() *UnifiedEventPublisher {
+	return NewUnifiedEventPublisher(s.eventManager)
 }
 
 // LoggerMiddleware creates a Gin middleware for logging

@@ -69,6 +69,7 @@ func (e *StreamingEngine) Execute(ctx context.Context, workflow *Workflow, varia
 		ID:              uuid.New().String(),
 		WorkflowID:      workflow.ID,
 		Status:          WorkflowStatusRunning,
+		RecoveryStatus:  RecoveryStatusNone,
 		StepExecutions:  make(map[string]*StepExecution),
 		Context:         NewExecutionContext(variables),
 		Checkpoints:     make(map[string]*StreamCheckpoint),
@@ -88,18 +89,22 @@ func (e *StreamingEngine) Execute(ctx context.Context, workflow *Workflow, varia
 	e.executionCache[execution.ID] = execution
 	e.mu.Unlock()
 
+	runCtx, cancel := context.WithCancel(ctx)
+	e.registerExecutionStop(execution.ID, cancel)
+
 	// 保存到repository
-	if e.repository != nil {
-		if err := e.repository.SaveExecution(execution); err != nil {
-			return nil, fmt.Errorf("failed to save execution: %w", err)
-		}
+	if err := e.persistWorkflowDefinition(workflow); err != nil {
+		return nil, fmt.Errorf("failed to save workflow definition: %w", err)
+	}
+	if err := e.persistExecutionSnapshot(execution); err != nil {
+		return nil, fmt.Errorf("failed to save execution: %w", err)
 	}
 
 	// 发布开始事件
 	e.publishEvent(execution.ID, "workflow_started", string(WorkflowStatusRunning), "Workflow execution started", nil)
 
 	// 在后台执行工作流
-	go e.executeWorkflowStreaming(ctx, workflow, dag, execution)
+	go e.executeWorkflowStreaming(runCtx, workflow, dag, execution)
 
 	return execution, nil
 }
@@ -343,6 +348,11 @@ func (e *StreamingEngine) executeWorkflowStreamingWithState(
 	// 等待所有执行的步骤完成
 	wg.Wait()
 
+	if execCtx.Err() == context.Canceled {
+		e.finishExecution(execution, WorkflowStatusCancelled, "Execution cancelled by user")
+		return
+	}
+
 	// 检查结果
 	mu.Lock()
 	hasFailed := len(failedSteps) > 0
@@ -383,6 +393,7 @@ func (e *StreamingEngine) executeStepStreaming(ctx context.Context, step *Step, 
 	execution.StepExecutions[step.ID] = stepExec
 	execution.CurrentStep = step.ID
 	e.mu.Unlock()
+	_ = e.persistExecutionSnapshot(execution)
 
 	e.publishEvent(execution.ID, "step_started", string(WorkflowStatusRunning),
 		fmt.Sprintf("Step %s started (streaming mode)", step.ID),
@@ -598,6 +609,7 @@ func (e *StreamingEngine) completeStreamingStep(
 		stepExec.Metadata["route"] = selectedRoute
 		stepExec.Metadata["route_targets"] = targets
 	}
+	_ = e.persistExecutionSnapshot(execution)
 
 	e.publishEvent(execution.ID, eventType, string(WorkflowStatusCompleted), message, map[string]interface{}{
 		"step_id":      step.ID,

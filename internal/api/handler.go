@@ -1,14 +1,15 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/orchestrator"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/workflow"
 )
 
 // 整体相当于一个处理工作任务创建的Service层
@@ -44,6 +45,12 @@ type TaskResponse struct {
 	CreatedAt          time.Time              `json:"created_at"`
 	StartedAt          *time.Time             `json:"started_at,omitempty"`
 	CompletedAt        *time.Time             `json:"completed_at,omitempty"`
+}
+
+// ExecuteWorkflowRequest represents the request body for executing a workflow.
+type ExecuteWorkflowRequest struct {
+	Workflow  *workflow.Workflow     `json:"workflow" binding:"required"`
+	Variables map[string]interface{} `json:"variables"`
 }
 
 // handleRoot handles the root endpoint
@@ -116,9 +123,6 @@ func (s *Server) handleCreateTask(c *gin.Context) {
 		return
 	}
 
-	// Create task
-	taskID := uuid.New().String()
-
 	// Set timeout (default: 60 seconds for normal tasks)
 	timeout := time.Duration(req.Timeout) * time.Second
 	if timeout == 0 {
@@ -129,21 +133,15 @@ func (s *Server) handleCreateTask(c *gin.Context) {
 		timeout = 5 * time.Minute
 	}
 
-	task := &orchestrator.Task{
-		ID:                 taskID,
-		AgentName:          req.AgentName,  // 如果指定了就用，否则留空自动选择
-		RequiredCapability: req.Capability, // 如果指定了能力
-		Action:             req.Action,
-		Parameters:         req.Parameters,
-		Priority:           req.Priority,
-		Timeout:            timeout,
-		Status:             orchestrator.TaskStatusPending,
-		CreatedAt:          time.Now(),
-	}
-
-	// Submit task to engine
-	// TaskManager 会在 PullNextTask 时自动选择合适的 Agent
-	if err := s.engine.SubmitTask(task); err != nil {
+	handle, err := s.executionService.ExecuteTask(context.Background(), &orchestrator.TaskExecutionRequest{
+		AgentName:  req.AgentName,
+		Capability: req.Capability,
+		Action:     req.Action,
+		Parameters: req.Parameters,
+		Priority:   req.Priority,
+		Timeout:    timeout,
+	})
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{
 			Success: false,
 			Error:   err.Error(),
@@ -151,8 +149,14 @@ func (s *Server) handleCreateTask(c *gin.Context) {
 		return
 	}
 
-	// Convert to response
-	response := convertTaskToResponse(task)
+	view, err := s.executionService.GetExecution(context.Background(), handle.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
 
 	// 构建响应消息
 	var message string
@@ -166,7 +170,7 @@ func (s *Server) handleCreateTask(c *gin.Context) {
 
 	c.JSON(http.StatusCreated, Response{
 		Success: true,
-		Data:    response,
+		Data:    view,
 		Message: message,
 	})
 }
@@ -175,8 +179,7 @@ func (s *Server) handleCreateTask(c *gin.Context) {
 func (s *Server) handleGetTask(c *gin.Context) {
 	taskID := c.Param("id")
 
-	// Get task from engine
-	task, err := s.engine.GetTask(taskID)
+	view, err := s.executionService.GetExecution(context.Background(), taskID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, Response{
 			Success: false,
@@ -185,12 +188,9 @@ func (s *Server) handleGetTask(c *gin.Context) {
 		return
 	}
 
-	// Convert to response
-	response := convertTaskToResponse(task)
-
 	c.JSON(http.StatusOK, Response{
 		Success: true,
-		Data:    response,
+		Data:    view,
 	})
 }
 
@@ -340,7 +340,94 @@ func (s *Server) handleCancelTask(c *gin.Context) {
 	})
 }
 
-// handleTaskEventStream handles SSE streaming for task events
+// handleExecuteWorkflow executes a workflow through the unified execution service.
+func (s *Server) handleExecuteWorkflow(c *gin.Context) {
+	var req ExecuteWorkflowRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, Response{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	handle, err := s.executionService.ExecuteWorkflow(context.Background(), &orchestrator.WorkflowExecutionRequest{
+		Workflow:  req.Workflow,
+		Variables: req.Variables,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	view, err := s.executionService.GetExecution(context.Background(), handle.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusCreated, Response{
+		Success: true,
+		Data:    view,
+		Message: "Workflow execution started",
+	})
+}
+
+// handleGetExecution returns a unified execution view for task or workflow.
+func (s *Server) handleGetExecution(c *gin.Context) {
+	executionID := c.Param("id")
+
+	view, err := s.executionService.GetExecution(context.Background(), executionID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, Response{
+			Success: false,
+			Error:   fmt.Sprintf("Execution not found: %s", executionID),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, Response{
+		Success: true,
+		Data:    view,
+	})
+}
+
+// handleCancelExecution cancels a unified execution when supported by the underlying engine.
+func (s *Server) handleCancelExecution(c *gin.Context) {
+	executionID := c.Param("id")
+
+	if err := s.executionService.CancelExecution(context.Background(), executionID); err != nil {
+		c.JSON(http.StatusBadRequest, Response{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	view, err := s.executionService.GetExecution(context.Background(), executionID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, Response{
+		Success: true,
+		Data:    view,
+		Message: "Execution cancelled successfully",
+	})
+}
+
+// handleTaskEventStream handles SSE streaming for task events.
+// The old route is kept for compatibility, but the payload is now the unified execution event model.
 func (s *Server) handleTaskEventStream(c *gin.Context) {
 	taskID := c.Param("id")
 
@@ -368,12 +455,13 @@ func (s *Server) handleTaskEventStream(c *gin.Context) {
 	defer s.eventManager.Unsubscribe(taskID, clientID)
 
 	// Send initial task state
-	initialEvent := TaskEvent{
-		Type:      "connected",
-		TaskID:    taskID,
-		Status:    string(task.Status),
-		Message:   "Connected to task event stream",
-		Timestamp: time.Now(),
+	initialEvent := ExecutionEvent{
+		Type:          "connected",
+		ExecutionID:   taskID,
+		ExecutionType: string(orchestrator.ExecutionTypeTask),
+		Status:        string(task.Status),
+		Message:       "Connected to task event stream",
+		Timestamp:     time.Now(),
 	}
 	fmt.Fprint(c.Writer, FormatSSE(initialEvent))
 	c.Writer.Flush()
@@ -415,6 +503,76 @@ func (s *Server) handleTaskEventStream(c *gin.Context) {
 
 		case <-c.Request.Context().Done():
 			// Client disconnected
+			return
+		}
+	}
+}
+
+// handleExecutionEventStream streams unified execution events for task or workflow executions.
+func (s *Server) handleExecutionEventStream(c *gin.Context) {
+	executionID := c.Param("id")
+
+	view, err := s.executionService.GetExecution(context.Background(), executionID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, Response{
+			Success: false,
+			Error:   fmt.Sprintf("Execution not found: %s", executionID),
+		})
+		return
+	}
+
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	clientID := fmt.Sprintf("client-%d", time.Now().UnixNano())
+	eventChannel := s.eventManager.Subscribe(executionID, clientID)
+	defer s.eventManager.Unsubscribe(executionID, clientID)
+
+	initialEvent := ExecutionEvent{
+		Type:                    "connected",
+		ExecutionID:             executionID,
+		ExecutionType:           string(view.Type),
+		Status:                  string(view.Status),
+		RecoveryStatus:          view.RecoveryStatus,
+		SupersededByExecutionID: view.SupersededByExecutionID,
+		Message:                 "Connected to execution event stream",
+		Timestamp:               time.Now(),
+	}
+	fmt.Fprint(c.Writer, FormatSSE(initialEvent))
+	c.Writer.Flush()
+
+	heartbeatTicker := time.NewTicker(15 * time.Second)
+	defer heartbeatTicker.Stop()
+
+	timeoutTimer := time.NewTimer(5 * time.Minute)
+	defer timeoutTimer.Stop()
+
+	for {
+		select {
+		case event, ok := <-eventChannel.Channel:
+			if !ok {
+				return
+			}
+
+			fmt.Fprint(c.Writer, FormatSSE(event))
+			c.Writer.Flush()
+
+			if event.Status == string(orchestrator.ExecutionStatusCompleted) ||
+				event.Status == string(orchestrator.ExecutionStatusFailed) ||
+				event.Status == string(orchestrator.ExecutionStatusCancelled) {
+				return
+			}
+
+		case <-heartbeatTicker.C:
+			fmt.Fprintf(c.Writer, ": heartbeat\n\n")
+			c.Writer.Flush()
+
+		case <-timeoutTimer.C:
+			return
+
+		case <-c.Request.Context().Done():
 			return
 		}
 	}

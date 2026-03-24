@@ -17,6 +17,16 @@ const (
 	WorkflowStatusSkipped   WorkflowStatus = "skipped"
 )
 
+// RecoveryStatus represents restart recovery lifecycle for a workflow execution.
+type RecoveryStatus string
+
+const (
+	RecoveryStatusNone        RecoveryStatus = "none"
+	RecoveryStatusInterrupted RecoveryStatus = "interrupted"
+	RecoveryStatusResumed     RecoveryStatus = "resumed"
+	RecoveryStatusSuperseded  RecoveryStatus = "superseded"
+)
+
 // Workflow 表示完整的工作流定义
 type Workflow struct {
 	ID          string                 `json:"id" yaml:"id"`
@@ -143,19 +153,21 @@ const (
 
 // WorkflowExecution represents a running or completed workflow instance
 type WorkflowExecution struct {
-	ID              string                       `json:"id"`
-	WorkflowID      string                       `json:"workflow_id"`
-	Status          WorkflowStatus               `json:"status"`
-	CurrentStep     string                       `json:"current_step,omitempty"`
-	StepExecutions  map[string]*StepExecution    `json:"step_executions"` // stepID -> execution details
-	Context         *ExecutionContext            `json:"context"`         // Workflow execution context
-	Checkpoints     map[string]*StreamCheckpoint `json:"checkpoints,omitempty"`
-	ResumeState     *ExecutionResumeState        `json:"resume_state,omitempty"`
-	RouteSelections map[string]string            `json:"route_selections,omitempty"` // router stepID -> selected route key
-	Error           string                       `json:"error,omitempty"`
-	StartedAt       time.Time                    `json:"started_at"`
-	CompletedAt     *time.Time                   `json:"completed_at,omitempty"`
-	notifier        *sync.Cond                   `json:"-"`
+	ID                      string                       `json:"id"`
+	WorkflowID              string                       `json:"workflow_id"`
+	Status                  WorkflowStatus               `json:"status"`
+	RecoveryStatus          RecoveryStatus               `json:"recovery_status,omitempty"`
+	CurrentStep             string                       `json:"current_step,omitempty"`
+	SupersededByExecutionID string                       `json:"superseded_by_execution_id,omitempty"`
+	StepExecutions          map[string]*StepExecution    `json:"step_executions"` // stepID -> execution details
+	Context                 *ExecutionContext            `json:"context"`         // Workflow execution context
+	Checkpoints             map[string]*StreamCheckpoint `json:"checkpoints,omitempty"`
+	ResumeState             *ExecutionResumeState        `json:"resume_state,omitempty"`
+	RouteSelections         map[string]string            `json:"route_selections,omitempty"` // router stepID -> selected route key
+	Error                   string                       `json:"error,omitempty"`
+	StartedAt               time.Time                    `json:"started_at"`
+	CompletedAt             *time.Time                   `json:"completed_at,omitempty"`
+	notifier                *sync.Cond                   `json:"-"`
 }
 
 // StepExecution represents the execution status of a single step

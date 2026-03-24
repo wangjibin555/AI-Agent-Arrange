@@ -16,6 +16,7 @@ type Engine struct {
 	agentRegistry  *agent.Registry
 	repository     Repository
 	executionCache map[string]*WorkflowExecution // executionID -> execution
+	executionStops map[string]context.CancelFunc // executionID -> cancel func
 	mu             sync.RWMutex
 	eventPublisher EventPublisher
 	defaultTimeout time.Duration
@@ -50,6 +51,7 @@ func NewEngine(config EngineConfig) *Engine {
 		repository:     config.Repository,
 		eventPublisher: config.EventPublisher,
 		executionCache: make(map[string]*WorkflowExecution),
+		executionStops: make(map[string]context.CancelFunc),
 		defaultTimeout: config.DefaultTimeout,
 		maxConcurrency: config.MaxConcurrency,
 	}
@@ -76,6 +78,7 @@ func (e *Engine) Execute(ctx context.Context, workflow *Workflow, variables map[
 		ID:              uuid.New().String(),
 		WorkflowID:      workflow.ID,
 		Status:          WorkflowStatusRunning,
+		RecoveryStatus:  RecoveryStatusNone,
 		StepExecutions:  make(map[string]*StepExecution),
 		Context:         NewExecutionContext(variables),
 		RouteSelections: make(map[string]string),
@@ -94,18 +97,22 @@ func (e *Engine) Execute(ctx context.Context, workflow *Workflow, variables map[
 	e.executionCache[execution.ID] = execution
 	e.mu.Unlock()
 
+	runCtx, cancel := context.WithCancel(ctx)
+	e.registerExecutionStop(execution.ID, cancel)
+
 	// Save to repository if available
-	if e.repository != nil {
-		if err := e.repository.SaveExecution(execution); err != nil {
-			return nil, fmt.Errorf("failed to save execution: %w", err)
-		}
+	if err := e.persistWorkflowDefinition(workflow); err != nil {
+		return nil, fmt.Errorf("failed to save workflow definition: %w", err)
+	}
+	if err := e.persistExecutionSnapshot(execution); err != nil {
+		return nil, fmt.Errorf("failed to save execution: %w", err)
 	}
 
 	// Publish start event
 	e.publishEvent(execution.ID, "workflow_started", string(WorkflowStatusRunning), "Workflow execution started", nil)
 
 	// Execute workflow in background
-	go e.executeWorkflow(ctx, workflow, dag, execution)
+	go e.executeWorkflow(runCtx, workflow, dag, execution)
 
 	return execution, nil
 }
@@ -137,7 +144,11 @@ func (e *Engine) executeWorkflow(ctx context.Context, workflow *Workflow, dag *D
 	for levelIdx, level := range executionLevels {
 		select {
 		case <-execCtx.Done():
-			e.finishExecution(execution, WorkflowStatusFailed, "Workflow execution timeout")
+			if execCtx.Err() == context.Canceled {
+				e.finishExecution(execution, WorkflowStatusCancelled, "Execution cancelled by user")
+			} else {
+				e.finishExecution(execution, WorkflowStatusFailed, "Workflow execution timeout")
+			}
 			return
 		default:
 		}
@@ -196,6 +207,11 @@ func (e *Engine) executeWorkflow(ctx context.Context, workflow *Workflow, dag *D
 		close(errors)
 
 		// Check for errors in this level
+		if execCtx.Err() == context.Canceled {
+			e.finishExecution(execution, WorkflowStatusCancelled, "Execution cancelled by user")
+			return
+		}
+
 		if len(errors) > 0 {
 			errMsg := "Step execution failed"
 			for err := range errors {
@@ -385,6 +401,7 @@ func (e *Engine) executeStep(ctx context.Context, step *Step, execution *Workflo
 	execution.StepExecutions[step.ID] = stepExec
 	execution.CurrentStep = step.ID
 	e.mu.Unlock()
+	_ = e.persistExecutionSnapshot(execution)
 
 	e.publishEvent(execution.ID, "step_started", string(WorkflowStatusRunning),
 		fmt.Sprintf("Step %s started", step.ID), map[string]interface{}{"step_id": step.ID})
@@ -478,6 +495,7 @@ func (e *Engine) executeStep(ctx context.Context, step *Step, execution *Workflo
 			stepExec.Metadata["route"] = selectedRoute
 			stepExec.Metadata["route_targets"] = targets
 		}
+		_ = e.persistExecutionSnapshot(execution)
 
 		e.publishEvent(execution.ID, "step_completed", string(WorkflowStatusCompleted),
 			fmt.Sprintf("Step %s completed successfully", step.ID),
@@ -546,6 +564,7 @@ func (e *Engine) executeForeachStep(
 			stepExec.Metadata["route"] = selectedRoute
 			stepExec.Metadata["route_targets"] = targets
 		}
+		_ = e.persistExecutionSnapshot(execution)
 
 		e.publishEvent(execution.ID, "step_completed", string(WorkflowStatusCompleted),
 			fmt.Sprintf("Step %s completed successfully", step.ID),
@@ -750,6 +769,7 @@ func (e *Engine) skipStep(step *Step, execution *WorkflowExecution, reason strin
 	e.mu.Lock()
 	execution.StepExecutions[step.ID] = stepExec
 	e.mu.Unlock()
+	_ = e.persistExecutionSnapshot(execution)
 
 	e.publishEvent(execution.ID, "step_skipped", string(WorkflowStatusSkipped),
 		fmt.Sprintf("Step %s skipped", step.ID),
@@ -765,6 +785,7 @@ func (e *Engine) failStep(stepExec *StepExecution, execution *WorkflowExecution,
 	stepExec.Error = err.Error()
 	now := time.Now()
 	stepExec.CompletedAt = &now
+	_ = e.persistExecutionSnapshot(execution)
 
 	e.publishEvent(execution.ID, "step_failed", string(WorkflowStatusFailed),
 		fmt.Sprintf("Step %s failed: %v", stepExec.StepID, err),
@@ -788,18 +809,20 @@ func (e *Engine) rollbackWorkflow(ctx context.Context, execution *WorkflowExecut
 // finishExecution marks execution as finished
 func (e *Engine) finishExecution(execution *WorkflowExecution, status WorkflowStatus, message string) {
 	e.mu.Lock()
+	if execution.CompletedAt != nil || (execution.Status != WorkflowStatusRunning && execution.Status != WorkflowStatusPending) {
+		e.mu.Unlock()
+		return
+	}
 	execution.Status = status
-	if status == WorkflowStatusFailed {
+	if status == WorkflowStatusFailed || status == WorkflowStatusCancelled {
 		execution.Error = message
 	}
 	now := time.Now()
 	execution.CompletedAt = &now
+	delete(e.executionStops, execution.ID)
 	e.mu.Unlock()
 
-	// Save to repository
-	if e.repository != nil {
-		_ = e.repository.SaveExecution(execution)
-	}
+	_ = e.persistExecutionSnapshot(execution)
 
 	e.publishEvent(execution.ID, "workflow_completed", string(status), message, nil)
 }
@@ -809,6 +832,13 @@ func (e *Engine) publishEvent(executionID, eventType, status, message string, da
 	if e.eventPublisher != nil {
 		e.eventPublisher.PublishWorkflowEvent(executionID, eventType, status, message, data)
 	}
+}
+
+// SetEventPublisher updates the workflow event publisher.
+func (e *Engine) SetEventPublisher(publisher EventPublisher) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.eventPublisher = publisher
 }
 
 // GetExecution retrieves a workflow execution by ID
@@ -840,6 +870,71 @@ func (e *Engine) CancelExecution(executionID string) error {
 		return fmt.Errorf("execution is not running")
 	}
 
-	e.finishExecution(execution, WorkflowStatusCancelled, "Execution cancelled by user")
+	e.mu.RLock()
+	cancel := e.executionStops[executionID]
+	e.mu.RUnlock()
+	if cancel == nil {
+		return fmt.Errorf("execution cancel function not found")
+	}
+
+	cancel()
 	return nil
+}
+
+func (e *Engine) registerExecutionStop(executionID string, cancel context.CancelFunc) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.executionStops[executionID] = cancel
+}
+
+func (e *Engine) persistWorkflowDefinition(workflow *Workflow) error {
+	if e.repository == nil || workflow == nil {
+		return nil
+	}
+	return e.repository.SaveWorkflow(workflow)
+}
+
+func (e *Engine) persistExecutionSnapshot(execution *WorkflowExecution) error {
+	if e.repository == nil || execution == nil {
+		return nil
+	}
+	return e.repository.SaveExecution(execution)
+}
+
+// RecoverRunningExecutions marks unfinished executions as interrupted after a restart
+// and repopulates the in-memory execution cache.
+func (e *Engine) RecoverRunningExecutions() (int, error) {
+	if e.repository == nil {
+		return 0, nil
+	}
+
+	runningExecutions, err := e.repository.GetRunningExecutions()
+	if err != nil {
+		return 0, fmt.Errorf("failed to load running executions: %w", err)
+	}
+
+	recovered := 0
+	for _, execution := range runningExecutions {
+		if execution == nil {
+			continue
+		}
+
+		e.mu.Lock()
+		e.executionCache[execution.ID] = execution
+		e.mu.Unlock()
+
+		execution.Status = WorkflowStatusFailed
+		execution.RecoveryStatus = RecoveryStatusInterrupted
+		execution.Error = "workflow interrupted by server restart"
+		now := time.Now()
+		execution.CompletedAt = &now
+
+		if err := e.persistExecutionSnapshot(execution); err != nil {
+			return recovered, fmt.Errorf("failed to persist interrupted execution %s: %w", execution.ID, err)
+		}
+
+		recovered++
+	}
+
+	return recovered, nil
 }

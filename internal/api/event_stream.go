@@ -10,29 +10,32 @@ import (
 	"go.uber.org/zap"
 )
 
-// 具体任务事件对象，负责存储
-type TaskEvent struct {
-	Type      string                 `json:"type"`      // event type: status_changed, progress, completed, failed
-	TaskID    string                 `json:"task_id"`   // task ID
-	Status    string                 `json:"status"`    // task status
-	Progress  int                    `json:"progress"`  // progress percentage (0-100)
-	Message   string                 `json:"message"`   // human-readable message
-	Result    map[string]interface{} `json:"result"`    // task result (for completed events)
-	Error     string                 `json:"error"`     // error message (for failed events)
-	Timestamp time.Time              `json:"timestamp"` // event timestamp
+// ExecutionEvent is the unified event model for task and workflow executions.
+type ExecutionEvent struct {
+	Type                    string                 `json:"type"`                                 // event type: step_started, completed, failed, cancelled ...
+	ExecutionID             string                 `json:"execution_id"`                         // unified execution ID
+	ExecutionType           string                 `json:"execution_type"`                       // task | workflow
+	Status                  string                 `json:"status"`                               // execution or step status
+	RecoveryStatus          string                 `json:"recovery_status,omitempty"`            // recovery lifecycle state for workflow executions
+	SupersededByExecutionID string                 `json:"superseded_by_execution_id,omitempty"` // resumed execution that superseded this execution
+	Message                 string                 `json:"message"`                              // human-readable message
+	Result                  map[string]interface{} `json:"result,omitempty"`                     // event result payload
+	Error                   string                 `json:"error,omitempty"`                      // error message
+	Data                    map[string]interface{} `json:"data,omitempty"`                       // extra event data
+	Timestamp               time.Time              `json:"timestamp"`                            // event timestamp
 }
 
 // SSE连接对象
 type EventChannel struct {
-	TaskID     string
-	ClientID   string
-	Channel    chan TaskEvent
-	LastActive time.Time
+	ExecutionID string
+	ClientID    string
+	Channel     chan ExecutionEvent
+	LastActive  time.Time
 }
 
 // EventStreamManager manages SSE connections and event distribution
 type EventStreamManager struct {
-	clients map[string][]*EventChannel // taskID -> list of client channels
+	clients map[string][]*EventChannel // executionID -> list of client channels
 	mu      sync.RWMutex
 }
 
@@ -48,59 +51,59 @@ func NewEventStreamManager() *EventStreamManager {
 	return manager
 }
 
-// Subscribe subscribes a client to task events
-func (m *EventStreamManager) Subscribe(taskID string, clientID string) *EventChannel {
+// Subscribe subscribes a client to execution events.
+func (m *EventStreamManager) Subscribe(executionID string, clientID string) *EventChannel {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	channel := &EventChannel{
-		TaskID:     taskID,
-		ClientID:   clientID,
-		Channel:    make(chan TaskEvent, 10), // buffered channel
-		LastActive: time.Now(),
+		ExecutionID: executionID,
+		ClientID:    clientID,
+		Channel:     make(chan ExecutionEvent, 10), // buffered channel
+		LastActive:  time.Now(),
 	}
 
-	m.clients[taskID] = append(m.clients[taskID], channel)
+	m.clients[executionID] = append(m.clients[executionID], channel)
 
-	logger.Info("Client subscribed to task events",
-		zap.String("task_id", taskID),
+	logger.Info("Client subscribed to execution events",
+		zap.String("execution_id", executionID),
 		zap.String("client_id", clientID),
-		zap.Int("total_clients", len(m.clients[taskID])),
+		zap.Int("total_clients", len(m.clients[executionID])),
 	)
 
 	return channel
 }
 
-// Unsubscribe unsubscribes a client from task events
-func (m *EventStreamManager) Unsubscribe(taskID string, clientID string) {
+// Unsubscribe unsubscribes a client from execution events.
+func (m *EventStreamManager) Unsubscribe(executionID string, clientID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	clients := m.clients[taskID]
+	clients := m.clients[executionID]
 	for i, client := range clients {
 		if client.ClientID == clientID {
 			close(client.Channel)
-			m.clients[taskID] = append(clients[:i], clients[i+1:]...)
+			m.clients[executionID] = append(clients[:i], clients[i+1:]...)
 
-			logger.Info("Client unsubscribed from task events",
-				zap.String("task_id", taskID),
+			logger.Info("Client unsubscribed from execution events",
+				zap.String("execution_id", executionID),
 				zap.String("client_id", clientID),
-				zap.Int("remaining_clients", len(m.clients[taskID])),
+				zap.Int("remaining_clients", len(m.clients[executionID])),
 			)
 
-			// Remove task entry if no clients left
-			if len(m.clients[taskID]) == 0 {
-				delete(m.clients, taskID)
+			// Remove execution entry if no clients left
+			if len(m.clients[executionID]) == 0 {
+				delete(m.clients, executionID)
 			}
 			break
 		}
 	}
 }
 
-// Publish publishes an event to all subscribers of a task
-func (m *EventStreamManager) Publish(event TaskEvent) {
+// Publish publishes an event to all subscribers of an execution.
+func (m *EventStreamManager) Publish(event ExecutionEvent) {
 	m.mu.RLock()
-	clients := m.clients[event.TaskID]
+	clients := m.clients[event.ExecutionID]
 	m.mu.RUnlock()
 
 	if len(clients) == 0 {
@@ -108,7 +111,7 @@ func (m *EventStreamManager) Publish(event TaskEvent) {
 	}
 
 	logger.Debug("Publishing event",
-		zap.String("task_id", event.TaskID),
+		zap.String("execution_id", event.ExecutionID),
 		zap.String("type", event.Type),
 		zap.Int("subscribers", len(clients)),
 	)
@@ -121,17 +124,17 @@ func (m *EventStreamManager) Publish(event TaskEvent) {
 			// Channel is full, skip this client
 			logger.Warn("Client channel full, skipping event",
 				zap.String("client_id", client.ClientID),
-				zap.String("task_id", event.TaskID),
+				zap.String("execution_id", event.ExecutionID),
 			)
 		}
 	}
 }
 
-// GetSubscriberCount returns the number of subscribers for a task
-func (m *EventStreamManager) GetSubscriberCount(taskID string) int {
+// GetSubscriberCount returns the number of subscribers for an execution.
+func (m *EventStreamManager) GetSubscriberCount(executionID string) int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return len(m.clients[taskID])
+	return len(m.clients[executionID])
 }
 
 // cleanupInactiveClients removes clients that haven't been active for too long
@@ -142,7 +145,7 @@ func (m *EventStreamManager) cleanupInactiveClients() {
 	for range ticker.C {
 		m.mu.Lock()
 
-		for taskID, clients := range m.clients {
+		for executionID, clients := range m.clients {
 			activeClients := make([]*EventChannel, 0, len(clients))
 
 			for _, client := range clients {
@@ -152,16 +155,16 @@ func (m *EventStreamManager) cleanupInactiveClients() {
 				} else {
 					close(client.Channel)
 					logger.Info("Removed inactive client",
-						zap.String("task_id", taskID),
+						zap.String("execution_id", executionID),
 						zap.String("client_id", client.ClientID),
 					)
 				}
 			}
 
 			if len(activeClients) == 0 {
-				delete(m.clients, taskID)
+				delete(m.clients, executionID)
 			} else {
-				m.clients[taskID] = activeClients
+				m.clients[executionID] = activeClients
 			}
 		}
 
@@ -169,18 +172,18 @@ func (m *EventStreamManager) cleanupInactiveClients() {
 	}
 }
 
-// SendHeartbeat sends a heartbeat/comment to keep connection alive
-func (m *EventStreamManager) SendHeartbeat(taskID string) {
-	event := TaskEvent{
-		Type:      "heartbeat",
-		TaskID:    taskID,
-		Timestamp: time.Now(),
+// SendHeartbeat sends a heartbeat/comment to keep connection alive.
+func (m *EventStreamManager) SendHeartbeat(executionID string) {
+	event := ExecutionEvent{
+		Type:        "heartbeat",
+		ExecutionID: executionID,
+		Timestamp:   time.Now(),
 	}
 	m.Publish(event)
 }
 
 // FormatSSE formats an event in SSE format
-func FormatSSE(event TaskEvent) string {
+func FormatSSE(event ExecutionEvent) string {
 	data, err := json.Marshal(event)
 	if err != nil {
 		logger.Error("Failed to marshal event", zap.Error(err))

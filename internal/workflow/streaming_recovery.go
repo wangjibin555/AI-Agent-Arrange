@@ -107,6 +107,7 @@ func (e *StreamingEngine) saveStreamingCheckpoint(
 		Output:      copyMap(output),
 		Timestamp:   time.Now(),
 	}
+	_ = e.persistExecutionSnapshot(execution)
 }
 
 func (e *StreamingEngine) restoreFromCheckpoint(
@@ -243,6 +244,7 @@ func (e *StreamingEngine) ResumeExecution(
 		ID:             uuid.New().String(),
 		WorkflowID:     workflow.ID,
 		Status:         WorkflowStatusRunning,
+		RecoveryStatus: RecoveryStatusResumed,
 		StepExecutions: make(map[string]*StepExecution),
 		Context:        NewExecutionContext(variables),
 		Checkpoints:    make(map[string]*StreamCheckpoint),
@@ -297,18 +299,112 @@ func (e *StreamingEngine) ResumeExecution(
 	e.executionCache[execution.ID] = execution
 	e.mu.Unlock()
 
-	if e.repository != nil {
-		if err := e.repository.SaveExecution(execution); err != nil {
-			return nil, fmt.Errorf("failed to save resumed execution: %w", err)
-		}
+	if err := e.persistExecutionSnapshot(execution); err != nil {
+		return nil, fmt.Errorf("failed to save resumed execution: %w", err)
 	}
 
 	e.publishEvent(execution.ID, "workflow_resumed", string(WorkflowStatusRunning),
 		fmt.Sprintf("Workflow resumed from execution %s", sourceExecutionID),
-		map[string]interface{}{"source_execution_id": sourceExecutionID})
+		map[string]interface{}{
+			"source_execution_id": sourceExecutionID,
+			"recovery_status":     string(RecoveryStatusResumed),
+		})
 
 	go e.executeWorkflowStreamingWithState(ctx, resumedWorkflow, resumedDAG, execution, make(map[string]bool), make(map[string]bool))
 	return execution, nil
+}
+
+// RecoverRunningExecutions attempts startup recovery for persisted running executions.
+// Streaming executions with checkpoints are resumed into new execution IDs.
+// Non-streaming or non-checkpointed executions are marked as interrupted.
+func (e *StreamingEngine) RecoverRunningExecutions(ctx context.Context) (int, int, error) {
+	if e.repository == nil {
+		return 0, 0, nil
+	}
+
+	runningExecutions, err := e.repository.GetRunningExecutions()
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to load running executions: %w", err)
+	}
+
+	resumedCount := 0
+	interruptedCount := 0
+
+	for _, execution := range runningExecutions {
+		if execution == nil {
+			continue
+		}
+
+		workflowDef, err := e.repository.GetWorkflow(execution.WorkflowID)
+		if err != nil {
+			if markErr := e.markExecutionInterrupted(execution, "workflow interrupted by server restart: definition unavailable"); markErr != nil {
+				return resumedCount, interruptedCount, fmt.Errorf("failed to mark interrupted execution %s: %w", execution.ID, markErr)
+			}
+			interruptedCount++
+			continue
+		}
+
+		if e.hasStreamingSteps(workflowDef) && len(execution.Checkpoints) > 0 {
+			if resumedExecution, err := e.ResumeExecution(ctx, workflowDef, execution.ID, nil); err == nil {
+				if markErr := e.markExecutionSuperseded(execution, resumedExecution.ID, "workflow superseded by resumed execution after server restart"); markErr != nil {
+					return resumedCount, interruptedCount, fmt.Errorf("failed to mark resumed source execution %s: %w", execution.ID, markErr)
+				}
+				resumedCount++
+				continue
+			}
+		}
+
+		if err := e.markExecutionInterrupted(execution, "workflow interrupted by server restart"); err != nil {
+			return resumedCount, interruptedCount, fmt.Errorf("failed to mark interrupted execution %s: %w", execution.ID, err)
+		}
+		interruptedCount++
+	}
+
+	return resumedCount, interruptedCount, nil
+}
+
+func (e *StreamingEngine) markExecutionInterrupted(execution *WorkflowExecution, message string) error {
+	e.mu.Lock()
+	e.executionCache[execution.ID] = execution
+	e.mu.Unlock()
+
+	execution.Status = WorkflowStatusFailed
+	execution.RecoveryStatus = RecoveryStatusInterrupted
+	execution.Error = message
+	now := time.Now()
+	execution.CompletedAt = &now
+
+	if err := e.persistExecutionSnapshot(execution); err != nil {
+		return err
+	}
+
+	e.publishEvent(execution.ID, "workflow_interrupted", string(execution.Status), message, map[string]interface{}{
+		"recovery_status": string(execution.RecoveryStatus),
+	})
+	return nil
+}
+
+func (e *StreamingEngine) markExecutionSuperseded(execution *WorkflowExecution, resumedExecutionID, message string) error {
+	e.mu.Lock()
+	e.executionCache[execution.ID] = execution
+	e.mu.Unlock()
+
+	execution.Status = WorkflowStatusFailed
+	execution.RecoveryStatus = RecoveryStatusSuperseded
+	execution.SupersededByExecutionID = resumedExecutionID
+	execution.Error = message
+	now := time.Now()
+	execution.CompletedAt = &now
+
+	if err := e.persistExecutionSnapshot(execution); err != nil {
+		return err
+	}
+
+	e.publishEvent(execution.ID, "workflow_superseded", string(execution.Status), message, map[string]interface{}{
+		"recovery_status":            string(execution.RecoveryStatus),
+		"superseded_by_execution_id": execution.SupersededByExecutionID,
+	})
+	return nil
 }
 
 func cloneWorkflowForResume(workflow *Workflow, restored map[string]bool) *Workflow {

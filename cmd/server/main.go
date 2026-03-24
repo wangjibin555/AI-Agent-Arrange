@@ -16,6 +16,7 @@ import (
 	mysqlStorage "github.com/wangjibin555/AI-Agent-Arrange/internal/storage/mysql"
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/tool"
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/tool/builtin"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/workflow"
 	"github.com/wangjibin555/AI-Agent-Arrange/pkg/config"
 	"github.com/wangjibin555/AI-Agent-Arrange/pkg/logger"
 	"go.uber.org/zap"
@@ -70,6 +71,7 @@ func main() {
 	// Initialize MySQL database (optional - for task persistence)
 	var db *mysqlStorage.DB
 	var taskRepo orchestrator.TaskRepository
+	var workflowRepo workflow.Repository
 	if shouldEnableMySQL() {
 		mysqlCfg := mysqlStorage.Config{
 			Host:     getEnv("MYSQL_HOST", "localhost"),
@@ -93,12 +95,14 @@ func main() {
 
 		// Create task repository
 		taskRepo = mysqlStorage.NewTaskRepository(db)
+		workflowRepo = mysqlStorage.NewWorkflowRepository(db)
 		logger.Info("✅ MySQL persistence enabled",
 			zap.String("host", mysqlCfg.Host),
 			zap.String("database", mysqlCfg.Database),
 		)
 	} else {
 		logger.Info("⚠️  MySQL persistence disabled (tasks stored in memory only)")
+		workflowRepo = workflow.NewMemoryRepository()
 	}
 
 	// Initialize global tool registry (shared by all agents)
@@ -126,18 +130,40 @@ func main() {
 		zap.Bool("persistence", taskRepo != nil),
 	)
 
+	workflowEngine := workflow.NewStreamingEngine(workflow.EngineConfig{
+		AgentRegistry:  registry,
+		Repository:     workflowRepo,
+		DefaultTimeout: cfg.Orchestrator.GetTaskTimeout(),
+		MaxConcurrency: cfg.Orchestrator.MaxConcurrentTasks,
+	})
+	logger.Info("Workflow engine initialized",
+		zap.Bool("streaming_enabled", true),
+		zap.Int("max_concurrency", cfg.Orchestrator.MaxConcurrentTasks),
+	)
+
 	// Start the engine
 	if err := engine.Start(ctx); err != nil {
 		logger.Fatal("Failed to start engine", zap.Error(err))
 	}
 
 	// Initialize HTTP server
-	httpServer := api.NewServer(engine, cfg.Server.Host, cfg.Server.Port, cfg.Server.Mode)
+	httpServer := api.NewServerWithWorkflow(engine, workflowEngine, cfg.Server.Host, cfg.Server.Port, cfg.Server.Mode)
 
-	// Setup event publisher for real-time task updates
+	// Setup unified event publisher for real-time task and workflow updates
 	eventPublisher := httpServer.GetEventPublisher()
 	engine.SetEventPublisher(eventPublisher)
-	logger.Info("Event publisher configured for real-time task updates")
+	workflowEngine.SetEventPublisher(eventPublisher)
+	logger.Info("Unified event publisher configured for task and workflow updates")
+
+	resumedCount, interruptedCount, err := workflowEngine.RecoverRunningExecutions(ctx)
+	if err != nil {
+		logger.Warn("Failed to recover workflow executions", zap.Error(err))
+	} else if resumedCount > 0 || interruptedCount > 0 {
+		logger.Info("Workflow execution recovery completed",
+			zap.Int("resumed", resumedCount),
+			zap.Int("interrupted", interruptedCount),
+		)
+	}
 
 	if err := httpServer.Start(); err != nil {
 		logger.Fatal("Failed to start HTTP server", zap.Error(err))
@@ -150,7 +176,10 @@ func main() {
 	fmt.Println("📡 API endpoints:")
 	fmt.Println("   - Health check: GET /health")
 	fmt.Println("   - Create task:  POST /api/v1/tasks")
-	fmt.Println("   - Task stream:  GET /api/v1/tasks/:id/stream (SSE)")
+	fmt.Println("   - Execute workflow: POST /api/v1/workflows/execute")
+	fmt.Println("   - Execution detail: GET /api/v1/executions/:id")
+	fmt.Println("   - Execution stream: GET /api/v1/executions/:id/stream (SSE)")
+	fmt.Println("   - Task stream (compat): GET /api/v1/tasks/:id/stream (SSE)")
 	fmt.Println("   - Engine status: GET /api/v1/status")
 	fmt.Println("\nPress Ctrl+C to stop")
 
