@@ -7,15 +7,17 @@ import (
 	"time"
 
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/agent"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/monitor"
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/apperr"
 )
 
 // TaskRepository defines the interface for task persistence
 type TaskRepository interface {
-	Create(task *Task) error
-	Update(task *Task) error
-	GetByID(id string) (*Task, error)
-	GetPendingTasks() ([]*Task, error)
-	GetRunningTasks() ([]*Task, error)
+	Create(ctx context.Context, task *Task) error
+	Update(ctx context.Context, task *Task) error
+	GetByID(ctx context.Context, id string) (*Task, error)
+	GetPendingTasks(ctx context.Context) ([]*Task, error)
+	GetRunningTasks(ctx context.Context) ([]*Task, error)
 }
 
 // TaskEventPublisher defines the interface for publishing task events
@@ -37,6 +39,7 @@ type TaskManager struct {
 	notifyChan       chan struct{} // 通知 Worker 有新任务
 	maxPendingTasks  int           // 最大待执行任务数（0 = 无限制）
 	maxTasksPerAgent int           // 单个 Agent 最大并发任务数（0 = 无限制）
+	metrics          *monitor.TaskMetrics
 }
 
 // TaskManagerConfig contains configuration for TaskManager
@@ -67,7 +70,7 @@ func NewTaskManager(registry *agent.Registry, config TaskManagerConfig) *TaskMan
 
 	// 如果配置了持久化，启动时恢复未完成的任务
 	if tm.repository != nil {
-		if err := tm.RecoverTasks(); err != nil {
+		if err := tm.RecoverTasks(context.Background()); err != nil {
 			// 记录错误但不中断启动
 			fmt.Printf("Warning: failed to recover tasks from database: %v\n", err)
 		}
@@ -76,8 +79,14 @@ func NewTaskManager(registry *agent.Registry, config TaskManagerConfig) *TaskMan
 	return tm
 }
 
+func (tm *TaskManager) SetMetrics(metrics *monitor.TaskMetrics) {
+	tm.metrics = metrics
+	tm.observeQueueLengthLocked()
+	tm.observeAgentLoadsLocked()
+}
+
 // RecoverTasks recovers pending and running tasks from database on startup
-func (tm *TaskManager) RecoverTasks() error {
+func (tm *TaskManager) RecoverTasks(ctx context.Context) error {
 	if tm.repository == nil {
 		return nil
 	}
@@ -86,7 +95,7 @@ func (tm *TaskManager) RecoverTasks() error {
 	defer tm.mu.Unlock()
 
 	// 1. 恢复 pending 任务
-	pendingTasks, err := tm.repository.GetPendingTasks()
+	pendingTasks, err := tm.repository.GetPendingTasks(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to recover pending tasks: %w", err)
 	}
@@ -97,7 +106,7 @@ func (tm *TaskManager) RecoverTasks() error {
 	}
 
 	// 2. 恢复 running 任务（服务重启时需要重新执行）
-	runningTasks, err := tm.repository.GetRunningTasks()
+	runningTasks, err := tm.repository.GetRunningTasks(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to recover running tasks: %w", err)
 	}
@@ -116,12 +125,12 @@ func (tm *TaskManager) RecoverTasks() error {
 			now := time.Now()
 			task.CompletedAt = &now
 			// 更新数据库
-			if err := tm.repository.Update(task); err != nil {
+			if err := tm.repository.Update(ctx, task); err != nil {
 				return fmt.Errorf("failed to mark interrupted task as failed: %w", err)
 			}
 		} else {
 			// 更新数据库为 pending 状态
-			if err := tm.repository.Update(task); err != nil {
+			if err := tm.repository.Update(ctx, task); err != nil {
 				return fmt.Errorf("failed to reset running task to pending: %w", err)
 			}
 			// 加入待执行队列
@@ -140,7 +149,7 @@ func (tm *TaskManager) RecoverTasks() error {
 }
 
 // CreateTask creates and stores a new task
-func (tm *TaskManager) CreateTask(task *Task) error {
+func (tm *TaskManager) CreateTask(ctx context.Context, task *Task) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
@@ -164,7 +173,7 @@ func (tm *TaskManager) CreateTask(task *Task) error {
 
 	// 1. 持久化到数据库（如果配置了 repository）
 	if tm.repository != nil {
-		if err := tm.repository.Create(task); err != nil {
+		if err := tm.repository.Create(ctx, task); err != nil {
 			return fmt.Errorf("failed to persist task: %w", err)
 		}
 	}
@@ -172,6 +181,8 @@ func (tm *TaskManager) CreateTask(task *Task) error {
 	// 2. 存入内存（快速访问）
 	tm.tasks[task.ID] = task
 	tm.pendingTasks = append(tm.pendingTasks, task.ID)
+	tm.observeTaskCreated(task)
+	tm.observeQueueLengthLocked()
 
 	// 通知 Worker 有新任务
 	select {
@@ -216,6 +227,7 @@ func (tm *TaskManager) PullNextTask(ctx context.Context) (*Task, error) {
 	task.Status = TaskStatusRunning
 	now := time.Now()
 	task.StartedAt = &now
+	tm.observeTaskStarted(task)
 
 	// 发布任务开始事件
 	if tm.eventPublisher != nil {
@@ -234,6 +246,8 @@ func (tm *TaskManager) PullNextTask(ctx context.Context) (*Task, error) {
 
 	// 从待执行队列中移除
 	tm.pendingTasks = tm.pendingTasks[1:]
+	tm.observeQueueLengthLocked()
+	tm.observeAgentLoadLocked(task.AgentName)
 
 	return task, nil
 }
@@ -280,7 +294,7 @@ func (tm *TaskManager) selectAgentForTask(task *Task) (agent.Agent, error) {
 		// 2.1 有明确的能力要求，筛选支持该能力的 Agent
 		candidateAgents = tm.registry.FindByCapability(task.RequiredCapability)
 		if len(candidateAgents) == 0 {
-			return nil, fmt.Errorf("no agent with capability '%s' found", task.RequiredCapability)
+			return nil, apperr.NotFoundf("no agent with capability '%s' found", task.RequiredCapability).WithCode("agent_capability_not_found")
 		}
 	} else {
 		// 2.2 没有指定能力，尝试从 Action 推断
@@ -293,7 +307,7 @@ func (tm *TaskManager) selectAgentForTask(task *Task) (agent.Agent, error) {
 		if len(candidateAgents) == 0 {
 			allAgents := tm.registry.GetAll()
 			if len(allAgents) == 0 {
-				return nil, fmt.Errorf("no agents registered")
+				return nil, apperr.NotFound("no agents registered").WithCode("agent_registry_empty")
 			}
 			// 转换 map 为 slice
 			for _, ag := range allAgents {
@@ -325,9 +339,9 @@ func (tm *TaskManager) selectAgentForTask(task *Task) (agent.Agent, error) {
 	if selectedAgent == nil {
 		// 如果有负载限制，可能所有 Agent 都满载了
 		if tm.maxTasksPerAgent > 0 {
-			return nil, fmt.Errorf("all agents are at max capacity (%d tasks each)", tm.maxTasksPerAgent)
+			return nil, apperr.Conflict(fmt.Sprintf("all agents are at max capacity (%d tasks each)", tm.maxTasksPerAgent)).WithCode("agent_capacity_exhausted")
 		}
-		return nil, fmt.Errorf("no suitable agent found")
+		return nil, apperr.NotFound("no suitable agent found").WithCode("agent_not_available")
 	}
 
 	return selectedAgent, nil
@@ -385,7 +399,7 @@ func (tm *TaskManager) GetAgentLoad(agentName string) int {
 }
 
 // GetTask retrieves a task by ID (memory first, then database)
-func (tm *TaskManager) GetTask(taskID string) (*Task, error) {
+func (tm *TaskManager) GetTask(ctx context.Context, taskID string) (*Task, error) {
 	tm.mu.RLock()
 	task, exists := tm.tasks[taskID]
 	tm.mu.RUnlock()
@@ -397,7 +411,7 @@ func (tm *TaskManager) GetTask(taskID string) (*Task, error) {
 
 	// 2. 内存中没有，从数据库中查找（降级）
 	if tm.repository != nil {
-		task, err := tm.repository.GetByID(taskID)
+		task, err := tm.repository.GetByID(ctx, taskID)
 		if err == nil {
 			// 找到了，加载到内存中
 			tm.mu.Lock()
@@ -407,7 +421,7 @@ func (tm *TaskManager) GetTask(taskID string) (*Task, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("task %s not found", taskID)
+	return nil, apperr.NotFoundf("task %s not found", taskID).WithCode("task_not_found")
 }
 
 // UpdateTaskStatus updates the status of a task
@@ -459,7 +473,7 @@ func (tm *TaskManager) MarkTaskAsRunning(taskID, agentName string) error {
 }
 
 // MarkTaskAsCompleted marks a task as completed
-func (tm *TaskManager) MarkTaskAsCompleted(taskID, agentName string, result map[string]interface{}) error {
+func (tm *TaskManager) MarkTaskAsCompleted(ctx context.Context, taskID, agentName string, result map[string]interface{}) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
@@ -475,7 +489,7 @@ func (tm *TaskManager) MarkTaskAsCompleted(taskID, agentName string, result map[
 
 	// 1. 更新数据库
 	if tm.repository != nil {
-		if err := tm.repository.Update(task); err != nil {
+		if err := tm.repository.Update(ctx, task); err != nil {
 			return fmt.Errorf("failed to update task in database: %w", err)
 		}
 	}
@@ -494,12 +508,13 @@ func (tm *TaskManager) MarkTaskAsCompleted(taskID, agentName string, result map[
 
 	// 3. 从 Agent 的任务列表中移除
 	tm.removeAgentTask(agentName, taskID)
+	tm.observeAgentLoadLocked(agentName)
 
 	return nil
 }
 
 // MarkTaskAsFailed marks a task as failed and optionally retries it
-func (tm *TaskManager) MarkTaskAsFailed(taskID, agentName string, errMsg string) error {
+func (tm *TaskManager) MarkTaskAsFailed(ctx context.Context, taskID, agentName string, errMsg string) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
@@ -520,10 +535,12 @@ func (tm *TaskManager) MarkTaskAsFailed(taskID, agentName string, errMsg string)
 		task.Status = TaskStatusPending
 		task.StartedAt = nil
 		tm.pendingTasks = append(tm.pendingTasks, taskID)
+		tm.observeTaskRetry(task, "execution_failed")
+		tm.observeQueueLengthLocked()
 
 		// 更新数据库（重试状态）
 		if tm.repository != nil {
-			if err := tm.repository.Update(task); err != nil {
+			if err := tm.repository.Update(ctx, task); err != nil {
 				return fmt.Errorf("failed to update task for retry: %w", err)
 			}
 		}
@@ -537,7 +554,7 @@ func (tm *TaskManager) MarkTaskAsFailed(taskID, agentName string, errMsg string)
 
 	// 更新数据库（最终失败状态）
 	if tm.repository != nil {
-		if err := tm.repository.Update(task); err != nil {
+		if err := tm.repository.Update(ctx, task); err != nil {
 			return fmt.Errorf("failed to update failed task: %w", err)
 		}
 	}
@@ -553,6 +570,8 @@ func (tm *TaskManager) MarkTaskAsFailed(taskID, agentName string, errMsg string)
 			errMsg,
 		)
 	}
+	tm.observeQueueLengthLocked()
+	tm.observeAgentLoadLocked(agentName)
 
 	return nil
 }
@@ -719,17 +738,17 @@ func (tm *TaskManager) GetStaleTasks(timeout time.Duration) []*Task {
 }
 
 // CancelTask marks a task as cancelled
-func (tm *TaskManager) CancelTask(taskID string) error {
+func (tm *TaskManager) CancelTask(ctx context.Context, taskID string) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
 	task, exists := tm.tasks[taskID]
 	if !exists {
-		return fmt.Errorf("task %s not found", taskID)
+		return apperr.NotFoundf("task %s not found", taskID).WithCode("task_not_found")
 	}
 
-	if task.Status == TaskStatusCompleted || task.Status == TaskStatusFailed {
-		return fmt.Errorf("task %s already finished", taskID)
+	if task.Status == TaskStatusCompleted || task.Status == TaskStatusFailed || task.Status == TaskStatusCancelled {
+		return apperr.Conflictf("Cannot cancel task in '%s' status", task.Status).WithCode("task_cancel_conflict")
 	}
 
 	task.Status = TaskStatusCancelled
@@ -738,7 +757,7 @@ func (tm *TaskManager) CancelTask(taskID string) error {
 
 	// 更新数据库
 	if tm.repository != nil {
-		if err := tm.repository.Update(task); err != nil {
+		if err := tm.repository.Update(ctx, task); err != nil {
 			return fmt.Errorf("failed to update cancelled task: %w", err)
 		}
 	}
@@ -762,6 +781,8 @@ func (tm *TaskManager) CancelTask(taskID string) error {
 	for agentName := range tm.agentTasks {
 		tm.removeAgentTask(agentName, taskID)
 	}
+	tm.observeQueueLengthLocked()
+	tm.observeAgentLoadsLocked()
 
 	return nil
 }
@@ -789,6 +810,50 @@ func (tm *TaskManager) removeAgentTask(agentName, taskID string) {
 	// 如果该 Agent 没有任务了，删除这个 key
 	if len(tm.agentTasks[agentName]) == 0 {
 		delete(tm.agentTasks, agentName)
+	}
+}
+
+func (tm *TaskManager) observeTaskCreated(task *Task) {
+	if tm.metrics == nil || task == nil {
+		return
+	}
+	tm.metrics.ObserveTaskCreated(task.AgentName, task.RequiredCapability, task.Action)
+}
+
+func (tm *TaskManager) observeTaskStarted(task *Task) {
+	if tm.metrics == nil || task == nil {
+		return
+	}
+	tm.metrics.ObserveTaskStarted(task.AgentName, task.Action)
+}
+
+func (tm *TaskManager) observeTaskRetry(task *Task, reason string) {
+	if tm.metrics == nil || task == nil {
+		return
+	}
+	tm.metrics.ObserveTaskRetry(task.AgentName, reason)
+}
+
+func (tm *TaskManager) observeQueueLengthLocked() {
+	if tm.metrics == nil {
+		return
+	}
+	tm.metrics.ObserveQueueLength(len(tm.pendingTasks))
+}
+
+func (tm *TaskManager) observeAgentLoadLocked(agentName string) {
+	if tm.metrics == nil || agentName == "" {
+		return
+	}
+	tm.metrics.ObserveAgentLoad(agentName, len(tm.agentTasks[agentName]))
+}
+
+func (tm *TaskManager) observeAgentLoadsLocked() {
+	if tm.metrics == nil {
+		return
+	}
+	for agentName, taskIDs := range tm.agentTasks {
+		tm.metrics.ObserveAgentLoad(agentName, len(taskIDs))
 	}
 }
 

@@ -1,12 +1,14 @@
 package mysql
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/workflow"
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/apperr"
 )
 
 // WorkflowRepository persists workflow definitions and execution snapshots in MySQL.
@@ -20,7 +22,7 @@ func NewWorkflowRepository(db *DB) *WorkflowRepository {
 }
 
 // SaveWorkflow upserts a workflow definition.
-func (r *WorkflowRepository) SaveWorkflow(wf *workflow.Workflow) error {
+func (r *WorkflowRepository) SaveWorkflow(ctx context.Context, wf *workflow.Workflow) error {
 	now := time.Now()
 	if wf.CreatedAt.IsZero() {
 		wf.CreatedAt = now
@@ -44,7 +46,8 @@ func (r *WorkflowRepository) SaveWorkflow(wf *workflow.Workflow) error {
 			updated_at = VALUES(updated_at)
 	`
 
-	_, err = r.db.Exec(
+	_, err = r.db.ExecWithContext(
+		ctx,
 		query,
 		wf.ID,
 		wf.Name,
@@ -61,8 +64,8 @@ func (r *WorkflowRepository) SaveWorkflow(wf *workflow.Workflow) error {
 }
 
 // GetWorkflow loads a workflow definition by ID.
-func (r *WorkflowRepository) GetWorkflow(id string) (*workflow.Workflow, error) {
-	row := r.db.QueryRow(`SELECT definition FROM workflows WHERE id = ?`, id)
+func (r *WorkflowRepository) GetWorkflow(ctx context.Context, id string) (*workflow.Workflow, error) {
+	row := r.db.QueryRowWithContext(ctx, `SELECT definition FROM workflows WHERE id = ?`, id)
 
 	var definitionJSON []byte
 	if err := row.Scan(&definitionJSON); err != nil {
@@ -81,8 +84,8 @@ func (r *WorkflowRepository) GetWorkflow(id string) (*workflow.Workflow, error) 
 }
 
 // ListWorkflows returns all stored workflow definitions.
-func (r *WorkflowRepository) ListWorkflows() ([]*workflow.Workflow, error) {
-	rows, err := r.db.Query(`SELECT definition FROM workflows ORDER BY updated_at DESC`)
+func (r *WorkflowRepository) ListWorkflows(ctx context.Context) ([]*workflow.Workflow, error) {
+	rows, err := r.db.QueryWithContext(ctx, `SELECT definition FROM workflows ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query workflows: %w", err)
 	}
@@ -110,8 +113,8 @@ func (r *WorkflowRepository) ListWorkflows() ([]*workflow.Workflow, error) {
 }
 
 // DeleteWorkflow deletes a workflow definition.
-func (r *WorkflowRepository) DeleteWorkflow(id string) error {
-	result, err := r.db.Exec(`DELETE FROM workflows WHERE id = ?`, id)
+func (r *WorkflowRepository) DeleteWorkflow(ctx context.Context, id string) error {
+	result, err := r.db.ExecWithContext(ctx, `DELETE FROM workflows WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete workflow %s: %w", id, err)
 	}
@@ -128,7 +131,7 @@ func (r *WorkflowRepository) DeleteWorkflow(id string) error {
 }
 
 // SaveExecution upserts a workflow execution snapshot.
-func (r *WorkflowRepository) SaveExecution(execution *workflow.WorkflowExecution) error {
+func (r *WorkflowRepository) SaveExecution(ctx context.Context, execution *workflow.WorkflowExecution) error {
 	contextJSON, err := marshalJSON(execution.Context)
 	if err != nil {
 		return fmt.Errorf("failed to marshal execution context: %w", err)
@@ -174,7 +177,8 @@ func (r *WorkflowRepository) SaveExecution(execution *workflow.WorkflowExecution
 			last_heartbeat_at = NOW()
 	`
 
-	_, err = r.db.Exec(
+	_, err = r.db.ExecWithContext(
+		ctx,
 		query,
 		execution.ID,
 		execution.WorkflowID,
@@ -199,8 +203,8 @@ func (r *WorkflowRepository) SaveExecution(execution *workflow.WorkflowExecution
 }
 
 // GetExecution loads one execution snapshot.
-func (r *WorkflowRepository) GetExecution(id string) (*workflow.WorkflowExecution, error) {
-	row := r.db.QueryRow(`
+func (r *WorkflowRepository) GetExecution(ctx context.Context, id string) (*workflow.WorkflowExecution, error) {
+	row := r.db.QueryRowWithContext(ctx, `
 		SELECT
 			id, workflow_id, status, recovery_status, current_step, superseded_by_execution_id, error,
 			context_json, step_executions_json, checkpoints_json,
@@ -213,7 +217,7 @@ func (r *WorkflowRepository) GetExecution(id string) (*workflow.WorkflowExecutio
 	execution, err := scanExecution(row)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("execution not found: %s", id)
+			return nil, apperr.NotFoundf("execution not found: %s", id).WithCode("execution_not_found")
 		}
 		return nil, fmt.Errorf("failed to query execution %s: %w", id, err)
 	}
@@ -222,8 +226,8 @@ func (r *WorkflowRepository) GetExecution(id string) (*workflow.WorkflowExecutio
 }
 
 // ListExecutions returns executions for one workflow.
-func (r *WorkflowRepository) ListExecutions(workflowID string) ([]*workflow.WorkflowExecution, error) {
-	rows, err := r.db.Query(`
+func (r *WorkflowRepository) ListExecutions(ctx context.Context, workflowID string) ([]*workflow.WorkflowExecution, error) {
+	rows, err := r.db.QueryWithContext(ctx, `
 		SELECT
 			id, workflow_id, status, recovery_status, current_step, superseded_by_execution_id, error,
 			context_json, step_executions_json, checkpoints_json,
@@ -242,8 +246,8 @@ func (r *WorkflowRepository) ListExecutions(workflowID string) ([]*workflow.Work
 }
 
 // GetRunningExecutions returns all executions still marked as running.
-func (r *WorkflowRepository) GetRunningExecutions() ([]*workflow.WorkflowExecution, error) {
-	rows, err := r.db.Query(`
+func (r *WorkflowRepository) GetRunningExecutions(ctx context.Context) ([]*workflow.WorkflowExecution, error) {
+	rows, err := r.db.QueryWithContext(ctx, `
 		SELECT
 			id, workflow_id, status, recovery_status, current_step, superseded_by_execution_id, error,
 			context_json, step_executions_json, checkpoints_json,

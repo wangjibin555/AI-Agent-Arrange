@@ -1,25 +1,15 @@
 package api
 
 import (
-	"context"
 	"fmt"
-	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/orchestrator"
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/workflow"
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/apperr"
 )
-
-// 整体相当于一个处理工作任务创建的Service层
-// Response represents a standard API response
-type Response struct {
-	Success bool        `json:"success"`
-	Data    interface{} `json:"data,omitempty"`
-	Error   string      `json:"error,omitempty"`
-	Message string      `json:"message,omitempty"`
-}
 
 // CreateTaskRequest represents the request body for creating a task
 type CreateTaskRequest struct {
@@ -62,27 +52,20 @@ type ExecuteWorkflowRequest struct {
 
 // handleRoot handles the root endpoint
 func (s *Server) handleRoot(c *gin.Context) {
-	c.JSON(http.StatusOK, Response{
-		Success: true,
-		Message: "AI Agent Orchestration Server is running",
-		Data: gin.H{
-			"version": "0.1.0",
-			"status":  "operational",
-		},
-	})
+	s.errors.OKWithMessage(c, gin.H{
+		"version": "0.1.0",
+		"status":  "operational",
+	}, "AI Agent Orchestration Server is running")
 }
 
 // handleHealth handles the health check endpoint
 func (s *Server) handleHealth(c *gin.Context) {
 	status := s.engine.GetStatus()
 
-	c.JSON(http.StatusOK, Response{
-		Success: true,
-		Data: gin.H{
-			"status":    "healthy",
-			"engine":    status,
-			"timestamp": time.Now(),
-		},
+	s.errors.OK(c, gin.H{
+		"status":    "healthy",
+		"engine":    status,
+		"timestamp": time.Now(),
 	})
 }
 
@@ -93,15 +76,12 @@ func (s *Server) handleEngineStatus(c *gin.Context) {
 	limits := s.engine.GetTaskLimits()
 	usage := s.engine.GetTaskUsage()
 
-	c.JSON(http.StatusOK, Response{
-		Success: true,
-		Data: gin.H{
-			"engine": status,
-			"tasks": gin.H{
-				"stats":  stats,
-				"limits": limits,
-				"usage":  usage,
-			},
+	s.errors.OK(c, gin.H{
+		"engine": status,
+		"tasks": gin.H{
+			"stats":  stats,
+			"limits": limits,
+			"usage":  usage,
 		},
 	})
 }
@@ -119,12 +99,9 @@ func (s *Server) handleListAgents(c *gin.Context) {
 		})
 	}
 
-	c.JSON(http.StatusOK, Response{
-		Success: true,
-		Data: gin.H{
-			"agents": agents,
-			"count":  len(agents),
-		},
+	s.errors.OK(c, gin.H{
+		"agents": agents,
+		"count":  len(agents),
 	})
 }
 
@@ -135,20 +112,7 @@ func (s *Server) handleListAgents(c *gin.Context) {
 // 3. 都不指定 - 从 action 推断能力，自动选择 Agent
 func (s *Server) handleCreateTask(c *gin.Context) {
 	var req CreateTaskRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, Response{
-			Success: false,
-			Error:   err.Error(),
-		})
-		return
-	}
-
-	// 验证：agent_name 和 capability 不能同时指定
-	if req.AgentName != "" && req.Capability != "" {
-		c.JSON(http.StatusBadRequest, Response{
-			Success: false,
-			Error:   "cannot specify both 'agent_name' and 'capability', choose one",
-		})
+	if !s.errors.BindJSON(c, &req) {
 		return
 	}
 
@@ -162,7 +126,7 @@ func (s *Server) handleCreateTask(c *gin.Context) {
 		timeout = 5 * time.Minute
 	}
 
-	handle, err := s.executionService.ExecuteTask(context.Background(), &orchestrator.TaskExecutionRequest{
+	handle, err := s.executionService.ExecuteTask(c.Request.Context(), &orchestrator.TaskExecutionRequest{
 		AgentName:  req.AgentName,
 		Capability: req.Capability,
 		Action:     req.Action,
@@ -171,19 +135,13 @@ func (s *Server) handleCreateTask(c *gin.Context) {
 		Timeout:    timeout,
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, Response{
-			Success: false,
-			Error:   err.Error(),
-		})
+		s.errors.Abort(c, err)
 		return
 	}
 
-	view, err := s.executionService.GetExecution(context.Background(), handle.ID)
+	view, err := s.executionService.GetExecution(c.Request.Context(), handle.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, Response{
-			Success: false,
-			Error:   err.Error(),
-		})
+		s.errors.Abort(c, err)
 		return
 	}
 
@@ -197,30 +155,20 @@ func (s *Server) handleCreateTask(c *gin.Context) {
 		message = "Task created, will auto-select agent based on action"
 	}
 
-	c.JSON(http.StatusCreated, Response{
-		Success: true,
-		Data:    view,
-		Message: message,
-	})
+	s.errors.Created(c, view, message)
 }
 
 // handleGetTask handles getting a specific task
 func (s *Server) handleGetTask(c *gin.Context) {
 	taskID := c.Param("id")
 
-	view, err := s.executionService.GetExecution(context.Background(), taskID)
+	view, err := s.executionService.GetExecution(c.Request.Context(), taskID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, Response{
-			Success: false,
-			Error:   fmt.Sprintf("Task not found: %s", taskID),
-		})
+		s.errors.Abort(c, err)
 		return
 	}
 
-	c.JSON(http.StatusOK, Response{
-		Success: true,
-		Data:    view,
-	})
+	s.errors.OK(c, view)
 }
 
 // handleListTasks handles listing all tasks
@@ -301,25 +249,18 @@ func (s *Server) handleListTasks(c *gin.Context) {
 		responses[i] = convertTaskToResponse(task)
 	}
 
-	c.JSON(http.StatusOK, Response{
-		Success: true,
-		Data: gin.H{
-			"tasks":  responses,
-			"total":  total,
-			"limit":  limit,
-			"offset": offset,
-		},
+	s.errors.OK(c, gin.H{
+		"tasks":  responses,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
 	})
 }
 
 // handleCreateSmartTask is now deprecated, use POST /api/v1/tasks with "capability" field instead
 // 保留此端点以保持向后兼容
 func (s *Server) handleCreateSmartTask(c *gin.Context) {
-	c.JSON(http.StatusGone, Response{
-		Success: false,
-		Error:   "This endpoint is deprecated. Use POST /api/v1/tasks with 'capability' field instead.",
-		Message: "Example: {\"capability\": \"translation\", \"action\": \"translate\", \"parameters\": {...}}",
-	})
+	s.errors.Abort(c, apperr.Gone("This endpoint is deprecated. Use POST /api/v1/tasks with 'capability' field instead.").WithCode("endpoint_deprecated"))
 }
 
 // handleCancelTask handles task cancellation
@@ -327,132 +268,79 @@ func (s *Server) handleCancelTask(c *gin.Context) {
 	taskID := c.Param("id")
 
 	// 看任务是否存在，是否可以被取消
-	task, err := s.engine.GetTask(taskID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, Response{
-			Success: false,
-			Error:   fmt.Sprintf("Task not found: %s", taskID),
-		})
-		return
-	}
-
-	// 看任务是否已经完成
-	if task.Status == orchestrator.TaskStatusCompleted ||
-		task.Status == orchestrator.TaskStatusFailed ||
-		task.Status == orchestrator.TaskStatusCancelled {
-		c.JSON(http.StatusBadRequest, Response{
-			Success: false,
-			Error:   fmt.Sprintf("Cannot cancel task in '%s' status", task.Status),
-			Message: "Only pending or running tasks can be cancelled",
-		})
+	if _, err := s.engine.GetTask(c.Request.Context(), taskID); err != nil {
+		s.errors.Abort(c, err)
 		return
 	}
 
 	// 如果以上校验都通过了，就可以进行取消了
 	taskManager := s.engine.GetTaskManager()
-	if err := taskManager.CancelTask(taskID); err != nil {
-		c.JSON(http.StatusInternalServerError, Response{
-			Success: false,
-			Error:   err.Error(),
-		})
+	if err := taskManager.CancelTask(c.Request.Context(), taskID); err != nil {
+		s.errors.Abort(c, err)
 		return
 	}
 
 	// 将
-	updatedTask, _ := s.engine.GetTask(taskID)
+	updatedTask, _ := s.engine.GetTask(c.Request.Context(), taskID)
 	response := convertTaskToResponse(updatedTask)
 
-	c.JSON(http.StatusOK, Response{
-		Success: true,
-		Data:    response,
-		Message: "Task cancelled successfully",
-	})
+	s.errors.OKWithMessage(c, response, "Task cancelled successfully")
 }
 
 // handleExecuteWorkflow executes a workflow through the unified execution service.
 func (s *Server) handleExecuteWorkflow(c *gin.Context) {
 	var req ExecuteWorkflowRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, Response{
-			Success: false,
-			Error:   err.Error(),
-		})
+	if !s.errors.BindJSON(c, &req) {
 		return
 	}
 
-	handle, err := s.executionService.ExecuteWorkflow(context.Background(), &orchestrator.WorkflowExecutionRequest{
+	handle, err := s.executionService.ExecuteWorkflow(c.Request.Context(), &orchestrator.WorkflowExecutionRequest{
 		Workflow:  req.Workflow,
 		Variables: req.Variables,
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, Response{
-			Success: false,
-			Error:   err.Error(),
-		})
+		s.errors.Abort(c, err)
 		return
 	}
 
-	view, err := s.executionService.GetExecution(context.Background(), handle.ID)
+	view, err := s.executionService.GetExecution(c.Request.Context(), handle.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, Response{
-			Success: false,
-			Error:   err.Error(),
-		})
+		s.errors.Abort(c, err)
 		return
 	}
 
-	c.JSON(http.StatusCreated, Response{
-		Success: true,
-		Data:    view,
-		Message: "Workflow execution started",
-	})
+	s.errors.Created(c, view, "Workflow execution started")
 }
 
 // handleGetExecution returns a unified execution view for task or workflow.
 func (s *Server) handleGetExecution(c *gin.Context) {
 	executionID := c.Param("id")
 
-	view, err := s.executionService.GetExecution(context.Background(), executionID)
+	view, err := s.executionService.GetExecution(c.Request.Context(), executionID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, Response{
-			Success: false,
-			Error:   fmt.Sprintf("Execution not found: %s", executionID),
-		})
+		s.errors.Abort(c, err)
 		return
 	}
 
-	c.JSON(http.StatusOK, Response{
-		Success: true,
-		Data:    view,
-	})
+	s.errors.OK(c, view)
 }
 
 // handleCancelExecution cancels a unified execution when supported by the underlying engine.
 func (s *Server) handleCancelExecution(c *gin.Context) {
 	executionID := c.Param("id")
 
-	if err := s.executionService.CancelExecution(context.Background(), executionID); err != nil {
-		c.JSON(http.StatusBadRequest, Response{
-			Success: false,
-			Error:   err.Error(),
-		})
+	if err := s.executionService.CancelExecution(c.Request.Context(), executionID); err != nil {
+		s.errors.Abort(c, err)
 		return
 	}
 
-	view, err := s.executionService.GetExecution(context.Background(), executionID)
+	view, err := s.executionService.GetExecution(c.Request.Context(), executionID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, Response{
-			Success: false,
-			Error:   err.Error(),
-		})
+		s.errors.Abort(c, err)
 		return
 	}
 
-	c.JSON(http.StatusOK, Response{
-		Success: true,
-		Data:    view,
-		Message: "Execution cancelled successfully",
-	})
+	s.errors.OKWithMessage(c, view, "Execution cancelled successfully")
 }
 
 // handleTaskEventStream handles SSE streaming for task events.
@@ -461,12 +349,9 @@ func (s *Server) handleTaskEventStream(c *gin.Context) {
 	taskID := c.Param("id")
 
 	// Check if task exists
-	task, err := s.engine.GetTask(taskID)
+	task, err := s.engine.GetTask(c.Request.Context(), taskID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, Response{
-			Success: false,
-			Error:   fmt.Sprintf("Task not found: %s", taskID),
-		})
+		s.errors.Abort(c, err)
 		return
 	}
 
@@ -480,8 +365,8 @@ func (s *Server) handleTaskEventStream(c *gin.Context) {
 	clientID := fmt.Sprintf("client-%d", time.Now().UnixNano())
 
 	// Subscribe to task events
-	eventChannel := s.eventManager.Subscribe(taskID, clientID)
-	defer s.eventManager.Unsubscribe(taskID, clientID)
+	eventChannel := s.eventManager.Subscribe(taskID, clientID, string(orchestrator.ExecutionTypeTask))
+	defer s.eventManager.Unsubscribe(taskID, clientID, string(orchestrator.ExecutionTypeTask))
 
 	// Send initial task state
 	initialEvent := ExecutionEvent{
@@ -541,12 +426,9 @@ func (s *Server) handleTaskEventStream(c *gin.Context) {
 func (s *Server) handleExecutionEventStream(c *gin.Context) {
 	executionID := c.Param("id")
 
-	view, err := s.executionService.GetExecution(context.Background(), executionID)
+	view, err := s.executionService.GetExecution(c.Request.Context(), executionID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, Response{
-			Success: false,
-			Error:   fmt.Sprintf("Execution not found: %s", executionID),
-		})
+		s.errors.Abort(c, err)
 		return
 	}
 
@@ -556,8 +438,8 @@ func (s *Server) handleExecutionEventStream(c *gin.Context) {
 	c.Header("X-Accel-Buffering", "no")
 
 	clientID := fmt.Sprintf("client-%d", time.Now().UnixNano())
-	eventChannel := s.eventManager.Subscribe(executionID, clientID)
-	defer s.eventManager.Unsubscribe(executionID, clientID)
+	eventChannel := s.eventManager.Subscribe(executionID, clientID, string(view.Type))
+	defer s.eventManager.Unsubscribe(executionID, clientID, string(view.Type))
 
 	initialEvent := ExecutionEvent{
 		Type:                    "connected",

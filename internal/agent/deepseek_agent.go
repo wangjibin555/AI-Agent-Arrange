@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sashabaranov/go-openai"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/monitor"
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/tool"
 )
 
@@ -22,6 +23,8 @@ type DeepSeekAgent struct {
 	temperature  float32
 	maxTokens    int
 	toolRegistry *tool.Registry // Function calling support
+	toolMetrics  *monitor.ToolMetrics
+	agentMetrics *monitor.AgentMetrics
 }
 
 // NewDeepSeekAgent creates a new DeepSeek agent
@@ -56,6 +59,14 @@ func NewDeepSeekAgent(name string, apiKey string) *DeepSeekAgent {
 // SetToolRegistry sets the tool registry for function calling
 func (a *DeepSeekAgent) SetToolRegistry(registry *tool.Registry) {
 	a.toolRegistry = registry
+}
+
+func (a *DeepSeekAgent) SetToolMetrics(metrics *monitor.ToolMetrics) {
+	a.toolMetrics = metrics
+}
+
+func (a *DeepSeekAgent) SetAgentMetrics(metrics *monitor.AgentMetrics) {
+	a.agentMetrics = metrics
 }
 
 // GetToolRegistry returns the tool registry
@@ -115,6 +126,7 @@ func (a *DeepSeekAgent) Shutdown() error {
 
 // Execute executes a task using DeepSeek API with function calling support
 func (a *DeepSeekAgent) Execute(ctx context.Context, input *TaskInput) (*TaskOutput, error) {
+	start := time.Now()
 	output := &TaskOutput{
 		TaskID:  input.TaskID,
 		Success: false,
@@ -124,6 +136,20 @@ func (a *DeepSeekAgent) Execute(ctx context.Context, input *TaskInput) (*TaskOut
 			"model":      a.model,
 			"started_at": time.Now().Format(time.RFC3339),
 		},
+	}
+	if a.agentMetrics != nil {
+		a.agentMetrics.ObserveAgentStarted(a.name)
+		defer func() {
+			status := "failed"
+			if ctx.Err() == context.Canceled {
+				status = "canceled"
+			} else if ctx.Err() == context.DeadlineExceeded {
+				status = "timeout"
+			} else if output.Success {
+				status = "success"
+			}
+			a.agentMetrics.ObserveAgentFinished(a.name, status, time.Since(start))
+		}()
 	}
 
 	// 检查必需参数
@@ -220,6 +246,9 @@ func (a *DeepSeekAgent) Execute(ctx context.Context, input *TaskInput) (*TaskOut
 			// 1. 处理文本内容（🌟 流式推送 Token）
 			if delta.Content != "" {
 				fullContent += delta.Content
+				if a.agentMetrics != nil {
+					a.agentMetrics.ObserveAgentStreamChunk(a.name)
+				}
 
 				// 准备流式数据块
 				chunkData := map[string]interface{}{
@@ -228,17 +257,7 @@ func (a *DeepSeekAgent) Execute(ctx context.Context, input *TaskInput) (*TaskOut
 					"iteration": iteration + 1,
 				}
 
-				// 实时发布 Token 事件（用于SSE）
-				if input.EventPublisher != nil {
-					input.EventPublisher.PublishTaskEvent(
-						input.TaskID,
-						"token_generated", // Token 流式事件
-						"running",
-						"",
-						chunkData,
-						"",
-					)
-				}
+				publishLLMStreamChunk(input, iteration+1, delta.Content, fullContent)
 
 				// 调用工作流流式回调（用于workflow streaming）
 				if input.StreamCallback != nil {
@@ -294,18 +313,8 @@ func (a *DeepSeekAgent) Execute(ctx context.Context, input *TaskInput) (*TaskOut
 		messages = append(messages, assistantMsg)
 
 		// 发布完整响应事件
-		if fullContent != "" && input.EventPublisher != nil {
-			input.EventPublisher.PublishTaskEvent(
-				input.TaskID,
-				"assistant_response",
-				"running",
-				"",
-				map[string]interface{}{
-					"content":   fullContent,
-					"iteration": iteration + 1,
-				},
-				"",
-			)
+		if fullContent != "" {
+			publishLLMResponseComplete(input, iteration+1, fullContent, finishReason)
 		}
 
 		// 检查是否有工具调用
@@ -325,6 +334,9 @@ func (a *DeepSeekAgent) Execute(ctx context.Context, input *TaskInput) (*TaskOut
 		}
 
 		// 并发执行所有工具调用
+		for i, toolCall := range toolCalls {
+			publishToolCallPrepared(input, i, toolCall)
+		}
 		toolResults := a.executeToolCallsConcurrently(ctx, toolCalls, input)
 
 		// 按原始顺序处理结果（保持消息顺序）
@@ -439,20 +451,7 @@ func (a *DeepSeekAgent) executeToolCallsConcurrently(ctx context.Context, toolCa
 			}()
 
 			// Publish start event
-			if input.EventPublisher != nil {
-				input.EventPublisher.PublishTaskEvent(
-					input.TaskID,
-					"tool_call_started",
-					"running",
-					"",
-					map[string]interface{}{
-						"tool_name": tc.Function.Name,
-						"arguments": tc.Function.Arguments,
-						"index":     index,
-					},
-					"",
-				)
-			}
+			publishToolCallStarted(input, index, tc)
 
 			// Execute tool
 			toolResult, err := a.executeToolCall(ctx, tc)
@@ -472,26 +471,7 @@ func (a *DeepSeekAgent) executeToolCallsConcurrently(ctx context.Context, toolCa
 			}
 
 			// Publish completion event
-			if input.EventPublisher != nil {
-				resultData := map[string]interface{}{
-					"tool_name": tc.Function.Name,
-					"success":   err == nil,
-					"index":     index,
-				}
-				if err != nil {
-					resultData["error"] = err.Error()
-				} else {
-					resultData["result"] = toolResult
-				}
-				input.EventPublisher.PublishTaskEvent(
-					input.TaskID,
-					"tool_call_completed",
-					"running",
-					"",
-					resultData,
-					"",
-				)
-			}
+			publishToolCallFinished(input, index, tc, toolResult, err)
 
 			resultChan <- result
 		}(i, toolCall)
@@ -521,6 +501,7 @@ func (a *DeepSeekAgent) executeToolCall(ctx context.Context, toolCall openai.Too
 
 	// 使用 Executor 执行工具（包含超时、重试、参数验证）
 	executor := tool.NewExecutor(a.toolRegistry, tool.DefaultExecutionConfig())
+	executor.SetMetrics(a.toolMetrics)
 	result, err := executor.Execute(ctx, toolCall.Function.Name, params)
 	if err != nil {
 		return nil, err // Already a ToolError with full context

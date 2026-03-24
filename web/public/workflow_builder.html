@@ -1002,6 +1002,8 @@
     let isSpacePressed = false;
     let workflowEventSource = null;
     let activeWorkflowExecutionId = '';
+    let activeWorkflowExecutionStatus = '';
+    let workflowExecutionPollTimer = null;
     let workflowLiveText = '';
     let workflowProcessEntries = [];
     let nodeExecutionState = {};
@@ -1040,6 +1042,11 @@
       workflowLiveText = '';
       workflowProcessEntries = [];
       nodeExecutionState = {};
+      activeWorkflowExecutionStatus = '';
+      if (workflowExecutionPollTimer) {
+        clearTimeout(workflowExecutionPollTimer);
+        workflowExecutionPollTimer = null;
+      }
       dom.workflowLiveText.textContent = '执行后，这里会持续显示最新正文。';
       dom.workflowProcess.innerHTML = '<div class="stream-process-item">当前还没有过程事件。</div>';
       renderNodeStreams();
@@ -2237,6 +2244,7 @@
       }
 
       const execution = payload.data || {};
+      activeWorkflowExecutionStatus = execution.status || activeWorkflowExecutionStatus || '';
       (execution.steps || []).forEach((step) => {
         nodeExecutionState[step.id] = {
           ...(nodeExecutionState[step.id] || {}),
@@ -2246,6 +2254,23 @@
           error: step.error || nodeExecutionState[step.id]?.error || ''
         };
       });
+      if (!workflowLiveText && Array.isArray(execution.steps)) {
+        const completedStep = execution.steps.find((step) => step.result?.text || step.result?.content);
+        if (completedStep) {
+          workflowLiveText = completedStep.result?.text || completedStep.result?.content || '';
+        }
+      }
+      dom.runResult.innerHTML = `
+        <strong>执行状态</strong><br>
+        execution_id=${escapeHtml(execution.id || executionID)}<br>
+        status=${escapeHtml(execution.status || '')}<br>
+        ${execution.error ? `error=${escapeHtml(execution.error)}<br>` : ''}
+        step_count=${escapeHtml(String((execution.steps || []).length))}
+      `;
+      if (['completed', 'failed', 'cancelled'].includes(activeWorkflowExecutionStatus) && workflowExecutionPollTimer) {
+        clearTimeout(workflowExecutionPollTimer);
+        workflowExecutionPollTimer = null;
+      }
       renderWorkflowStreamingView();
     }
 
@@ -2256,9 +2281,36 @@
       }
     }
 
+    function stopWorkflowExecutionPolling() {
+      if (workflowExecutionPollTimer) {
+        clearTimeout(workflowExecutionPollTimer);
+        workflowExecutionPollTimer = null;
+      }
+    }
+
+    function scheduleWorkflowExecutionPolling(executionID, delay = 1200) {
+      stopWorkflowExecutionPolling();
+      if (!executionID) {
+        return;
+      }
+      workflowExecutionPollTimer = window.setTimeout(async () => {
+        try {
+          await fetchWorkflowExecution(executionID);
+        } catch {}
+
+        if (activeWorkflowExecutionId === executionID && !['completed', 'failed', 'cancelled'].includes(activeWorkflowExecutionStatus)) {
+          scheduleWorkflowExecutionPolling(executionID, 1200);
+        }
+      }, delay);
+    }
+
     function applyWorkflowEvent(payload) {
       if (!payload || payload.execution_id !== activeWorkflowExecutionId) {
         return;
+      }
+
+      if (payload.status) {
+        activeWorkflowExecutionStatus = payload.status;
       }
 
       const stepID = payload.data?.step_id || payload.result?.step_id || '';
@@ -2267,23 +2319,47 @@
       if (payload.type === 'step_started' && state) {
         state.status = 'running';
       }
-      if ((payload.type === 'token_generated' || payload.type === 'assistant_response') && state) {
-        const text = payload.result?.text || payload.result?.content || payload.data?.result?.text || payload.data?.result?.content || '';
+      if ((payload.type === 'llm_stream_chunk' || payload.type === 'llm_response_complete') && state) {
+        const text = payload.result?.content || payload.result?.text || payload.data?.result?.content || payload.data?.result?.text || '';
         if (text) {
           state.text = text;
           state.status = 'streaming';
           workflowLiveText = text;
         }
       }
-      if ((payload.type === 'step_completed' || payload.type === 'step_completed_partial') && state) {
+      if ((payload.type === 'step_completed' || payload.type === 'step_completed_partial' || payload.type === 'step_completed_fallback') && state) {
         state.status = 'completed';
         state.result = payload.data?.result || payload.result || state.result || null;
         state.text = state.result?.text || state.result?.content || state.text || '';
         workflowLiveText = state.text || workflowLiveText;
       }
-      if (payload.type === 'failed' && state) {
+      if (payload.type === 'step_failed' && state) {
         state.status = 'failed';
         state.error = payload.data?.error || payload.error || payload.message || state.error || '';
+      }
+      if (payload.type === 'step_skipped' && state) {
+        state.status = 'skipped';
+        state.error = payload.data?.reason || payload.message || state.error || '';
+      }
+      if (payload.type === 'workflow_completed') {
+        activeWorkflowExecutionStatus = payload.status || activeWorkflowExecutionStatus || '';
+        stopWorkflowExecutionPolling();
+        dom.runResult.innerHTML = `
+          <strong>执行结束</strong><br>
+          execution_id=${escapeHtml(payload.execution_id || activeWorkflowExecutionId)}<br>
+          status=${escapeHtml(payload.status || '')}<br>
+          message=${escapeHtml(payload.message || '')}
+        `;
+      }
+      if (payload.type === 'workflow_interrupted' || payload.type === 'workflow_superseded') {
+        dom.runResult.innerHTML = `
+          <strong>执行状态变更</strong><br>
+          execution_id=${escapeHtml(payload.execution_id || activeWorkflowExecutionId)}<br>
+          status=${escapeHtml(payload.status || '')}<br>
+          recovery_status=${escapeHtml(payload.recovery_status || '')}<br>
+          ${payload.superseded_by_execution_id ? `superseded_by_execution_id=${escapeHtml(payload.superseded_by_execution_id)}<br>` : ''}
+          message=${escapeHtml(payload.message || '')}
+        `;
       }
 
       pushWorkflowProcessEntry(payload.type || 'event', payload.message || '');
@@ -2291,6 +2367,7 @@
 
     function startWorkflowSse(executionID) {
       stopWorkflowSse();
+      stopWorkflowExecutionPolling();
       activeWorkflowExecutionId = executionID;
       workflowEventSource = new EventSource(`${getServerUrl()}/api/v1/executions/${executionID}/stream`);
 
@@ -2300,12 +2377,33 @@
         } catch {}
       };
 
-      ['connected', 'step_started', 'step_streaming', 'token_generated', 'assistant_response', 'step_completed', 'step_completed_partial', 'completed', 'failed'].forEach((name) => {
+      [
+        'connected',
+        'workflow_started',
+        'workflow_resumed',
+        'workflow_interrupted',
+        'workflow_superseded',
+        'workflow_completed',
+        'step_started',
+        'step_retry',
+        'step_streaming',
+        'step_completed',
+        'step_completed_partial',
+        'step_completed_fallback',
+        'step_failed',
+        'step_skipped',
+        'step_routed',
+        'llm_stream_chunk',
+        'llm_response_complete',
+        'tool_call_prepared',
+        'tool_call_started',
+        'tool_call_finished'
+      ].forEach((name) => {
         workflowEventSource.addEventListener(name, async (event) => {
           try {
             const payload = JSON.parse(event.data);
             applyWorkflowEvent(payload);
-            if (name === 'completed' || name === 'failed') {
+            if (name === 'workflow_completed' || name === 'workflow_interrupted' || name === 'workflow_superseded' || name === 'step_failed') {
               await fetchWorkflowExecution(executionID);
             }
           } catch {}
@@ -2314,12 +2412,15 @@
 
       workflowEventSource.onerror = async () => {
         const terminalStates = ['completed', 'failed', 'cancelled'];
-        const hasTerminalNode = Object.values(nodeExecutionState).some((state) => terminalStates.includes(state?.status));
-        pushWorkflowProcessEntry('sse', hasTerminalNode ? '连接已正常结束' : '连接已结束或出现异常');
+        const endedNormally = terminalStates.includes(activeWorkflowExecutionStatus);
+        pushWorkflowProcessEntry('sse', endedNormally ? '连接已正常结束' : '连接已结束或出现异常');
         stopWorkflowSse();
         try {
           await fetchWorkflowExecution(executionID);
         } catch {}
+        if (!endedNormally && activeWorkflowExecutionId === executionID) {
+          scheduleWorkflowExecutionPolling(executionID, 1200);
+        }
       };
     }
 
@@ -2348,6 +2449,7 @@
         activeWorkflowExecutionId = execution.id || '';
         startWorkflowSse(activeWorkflowExecutionId);
         fetchWorkflowExecution(activeWorkflowExecutionId).catch(() => {});
+        scheduleWorkflowExecutionPolling(activeWorkflowExecutionId, 1500);
         dom.runResult.innerHTML = `
           <strong>创建成功</strong><br>
           execution_id=${escapeHtml(execution.id || '')}<br>

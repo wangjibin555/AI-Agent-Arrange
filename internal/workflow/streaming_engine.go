@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/agent"
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/apperr"
 )
 
 // StreamingEngine 扩展Engine，增加流式执行能力
@@ -63,9 +64,15 @@ func (e *StreamingEngine) Execute(ctx context.Context, workflow *Workflow, varia
 	}
 
 	// 验证工作流
+	if workflow != nil && workflow.Name == "" && workflow.ID != "" {
+		workflow.Name = workflow.ID
+	}
+	if err := ValidateDefinition(workflow); err != nil {
+		return nil, err
+	}
 	dag, err := NewDAG(workflow.Steps)
 	if err != nil {
-		return nil, fmt.Errorf("invalid workflow: %w", err)
+		return nil, apperr.InvalidArgument("invalid workflow").WithCode("workflow_structure_invalid").WithCause(err)
 	}
 
 	// 创建执行上下文
@@ -93,18 +100,25 @@ func (e *StreamingEngine) Execute(ctx context.Context, workflow *Workflow, varia
 	e.executionCache[execution.ID] = execution
 	e.mu.Unlock()
 
-	runCtx, cancel := context.WithCancel(ctx)
+	// Streaming workflow execution is asynchronous and must outlive the HTTP request context.
+	// Keep context values, but detach from request cancellation.
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	e.registerExecutionStop(execution.ID, cancel)
 
 	// 保存到repository
-	if err := e.persistWorkflowDefinition(workflow); err != nil {
-		return nil, fmt.Errorf("failed to save workflow definition: %w", err)
+	if err := e.persistWorkflowDefinition(ctx, workflow); err != nil {
+		return nil, apperr.Internal("failed to save workflow definition").
+			WithCode("workflow_definition_persist_failed").
+			WithCause(err)
 	}
-	if err := e.persistExecutionSnapshot(execution); err != nil {
-		return nil, fmt.Errorf("failed to save execution: %w", err)
+	if err := e.persistExecutionSnapshot(ctx, execution); err != nil {
+		return nil, apperr.Internal("failed to save execution").
+			WithCode("workflow_execution_persist_failed").
+			WithCause(err)
 	}
 
 	// 发布开始事件
+	e.observeWorkflowStarted(workflow)
 	e.publishEvent(execution.ID, "workflow_started", string(WorkflowStatusRunning), "Workflow execution started", nil)
 
 	// 在后台执行工作流
@@ -227,7 +241,9 @@ func (e *StreamingEngine) executeWorkflowStreamingWithState(
 							StepID:    step.ID,
 							Status:    WorkflowStatusRunning,
 							StartedAt: time.Now(),
-						}, execution, fmt.Errorf("failed to evaluate step decision: %w", err))
+						}, execution, apperr.Internal("failed to evaluate step decision").
+							WithCode("workflow_step_decision_failed").
+							WithCause(err))
 						continue
 					}
 					//节点等待，还不能触发
@@ -390,18 +406,21 @@ func (e *StreamingEngine) executeStepStreaming(ctx context.Context, step *Step, 
 		StepID:    step.ID,
 		Status:    WorkflowStatusRunning,
 		StartedAt: time.Now(),
-		Metadata:  make(map[string]interface{}),
+		Metadata: map[string]interface{}{
+			"step_type": workflowStepType(step),
+		},
 	}
 
 	e.mu.Lock()
 	execution.StepExecutions[step.ID] = stepExec
 	execution.CurrentStep = step.ID
 	e.mu.Unlock()
-	_ = e.persistExecutionSnapshot(execution)
+	_ = e.persistExecutionSnapshot(context.Background(), execution)
 
 	e.publishEvent(execution.ID, "step_started", string(WorkflowStatusRunning),
 		fmt.Sprintf("Step %s started (streaming mode)", step.ID),
 		map[string]interface{}{"step_id": step.ID, "streaming": true})
+	e.observeStepStarted(execution.WorkflowID, step, stepExec)
 
 	// 创建流式缓冲区
 	buffer := NewStreamBuffer(step.ID, step.Streaming)
@@ -421,10 +440,10 @@ func (e *StreamingEngine) executeStepStreaming(ctx context.Context, step *Step, 
 					})
 			case "fallback":
 				return e.executeStepStreamingFallback(ctx, step, execution, stepExec, buffer,
-					fmt.Errorf("failed to subscribe upstream: %w", err))
+					apperr.Internal("failed to subscribe upstream").WithCode("workflow_stream_subscribe_failed").WithCause(err))
 			default:
 				buffer.MarkComplete()
-				return e.failStep(stepExec, execution, fmt.Errorf("failed to subscribe upstream: %w", err))
+				return e.failStep(stepExec, execution, apperr.Internal("failed to subscribe upstream").WithCode("workflow_stream_subscribe_failed").WithCause(err))
 			}
 		}
 	}
@@ -435,10 +454,10 @@ func (e *StreamingEngine) executeStepStreaming(ctx context.Context, step *Step, 
 	if err != nil {
 		if e.getStreamingOnError(step) == "fallback" {
 			return e.executeStepStreamingFallback(ctx, step, execution, stepExec, buffer,
-				fmt.Errorf("failed to render parameters: %w", err))
+				apperr.InvalidArgument("failed to render parameters").WithCode("workflow_step_params_render_failed").WithCause(err))
 		}
 		buffer.MarkComplete()
-		return e.failStep(stepExec, execution, fmt.Errorf("failed to render parameters: %w", err))
+		return e.failStep(stepExec, execution, apperr.InvalidArgument("failed to render parameters").WithCode("workflow_step_params_render_failed").WithCause(err))
 	}
 
 	// 执行步骤（带重试）
@@ -505,7 +524,7 @@ func (e *StreamingEngine) executeStepStreaming(ctx context.Context, step *Step, 
 		// 获取agent
 		ag, err := e.agentRegistry.Get(step.AgentName)
 		if err != nil {
-			lastErr = fmt.Errorf("agent not found: %s", step.AgentName)
+			lastErr = apperr.NotFoundf("agent not found: %s", step.AgentName).WithCode("workflow_step_agent_not_found")
 			continue
 		}
 
@@ -545,7 +564,7 @@ func (e *StreamingEngine) executeStepStreaming(ctx context.Context, step *Step, 
 		}
 
 		if !output.Success {
-			lastErr = fmt.Errorf("step execution failed: %s", output.Error)
+			lastErr = apperr.Internalf("step execution failed: %s", output.Error).WithCode("workflow_step_execution_failed")
 			continue
 		}
 
@@ -609,12 +628,12 @@ func (e *StreamingEngine) completeStreamingStep(
 	if step.Route != nil {
 		selectedRoute, targets, err := e.applyRouteSelection(step, execution)
 		if err != nil {
-			return e.failStep(stepExec, execution, fmt.Errorf("failed to apply route selection: %w", err))
+			return e.failStep(stepExec, execution, apperr.Internal("failed to apply route selection").WithCode("workflow_route_apply_failed").WithCause(err))
 		}
 		stepExec.Metadata["route"] = selectedRoute
 		stepExec.Metadata["route_targets"] = targets
 	}
-	_ = e.persistExecutionSnapshot(execution)
+	_ = e.persistExecutionSnapshot(context.Background(), execution)
 
 	e.publishEvent(execution.ID, eventType, string(WorkflowStatusCompleted), message, map[string]interface{}{
 		"step_id":      step.ID,
@@ -622,6 +641,7 @@ func (e *StreamingEngine) completeStreamingStep(
 		"total_tokens": buffer.TotalTokens(),
 		"total_chunks": buffer.TotalChunks(),
 	})
+	e.observeStepFinished(execution.WorkflowID, stepExec, string(WorkflowStatusCompleted))
 
 	return nil
 }
@@ -688,14 +708,14 @@ func (e *StreamingEngine) executeStepStreamingFallback(
 
 	if err := e.waitForDependenciesCompletion(ctx, step, execution); err != nil {
 		buffer.MarkComplete()
-		return e.failStep(stepExec, execution, fmt.Errorf("fallback dependency wait failed: %w", err))
+		return e.failStep(stepExec, execution, apperr.Internal("fallback dependency wait failed").WithCode("workflow_stream_fallback_dependency_wait_failed").WithCause(err))
 	}
 
 	engine := NewTemplateEngine(execution.Context)
 	renderedParams, err := engine.RenderParameters(step.Parameters)
 	if err != nil {
 		buffer.MarkComplete()
-		return e.failStep(stepExec, execution, fmt.Errorf("fallback render failed: %w", err))
+		return e.failStep(stepExec, execution, apperr.InvalidArgument("fallback render failed").WithCode("workflow_stream_fallback_render_failed").WithCause(err))
 	}
 
 	taskID := uuid.New().String()
@@ -721,7 +741,7 @@ func (e *StreamingEngine) executeStepStreamingFallback(
 	ag, err := e.agentRegistry.Get(step.AgentName)
 	if err != nil {
 		buffer.MarkComplete()
-		return e.failStep(stepExec, execution, fmt.Errorf("fallback agent not found: %s", step.AgentName))
+		return e.failStep(stepExec, execution, apperr.NotFoundf("fallback agent not found: %s", step.AgentName).WithCode("workflow_step_agent_not_found"))
 	}
 
 	stepCtx := ctx
@@ -734,11 +754,11 @@ func (e *StreamingEngine) executeStepStreamingFallback(
 	output, err := ag.Execute(stepCtx, taskInput)
 	if err != nil {
 		buffer.MarkComplete()
-		return e.failStep(stepExec, execution, fmt.Errorf("fallback execution failed: %w", err))
+		return e.failStep(stepExec, execution, apperr.Internal("fallback execution failed").WithCode("workflow_stream_fallback_execution_failed").WithCause(err))
 	}
 	if !output.Success {
 		buffer.MarkComplete()
-		return e.failStep(stepExec, execution, fmt.Errorf("fallback step execution failed: %s", output.Error))
+		return e.failStep(stepExec, execution, apperr.Internalf("fallback step execution failed: %s", output.Error).WithCode("workflow_step_execution_failed"))
 	}
 
 	if output.Result == nil {
@@ -787,7 +807,7 @@ func (e *StreamingEngine) waitForDependenciesCompletion(
 			}
 			if depExec.Status == WorkflowStatusFailed {
 				e.mu.RUnlock()
-				return fmt.Errorf("dependency %s failed", depID)
+				return apperr.Conflictf("dependency %s failed", depID).WithCode("workflow_dependency_failed")
 			}
 		}
 		e.mu.RUnlock()
@@ -798,7 +818,7 @@ func (e *StreamingEngine) waitForDependenciesCompletion(
 
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return apperr.Wrap(ctx.Err(), apperr.KindInternal, "workflow_dependency_wait_canceled", "dependency wait interrupted")
 		case <-ticker.C:
 		}
 	}
@@ -911,9 +931,9 @@ func (e *StreamingEngine) subscribeToUpstream(ctx context.Context, step *Step, e
 			// 收到初始数据
 			continue
 		case <-timeoutTimer.C:
-			return fmt.Errorf("timeout waiting for initial data from dependency: %s", depID)
+			return apperr.Conflictf("timeout waiting for initial data from dependency: %s", depID).WithCode("workflow_stream_dependency_timeout")
 		case <-ctx.Done():
-			return ctx.Err()
+			return apperr.Wrap(ctx.Err(), apperr.KindInternal, "workflow_stream_dependency_wait_canceled", "waiting for upstream data interrupted")
 		}
 	}
 
@@ -1081,17 +1101,17 @@ func (r *executionContextReader) WaitForField(stepID string, fieldPath string, t
 		// 检查步骤是否已完成
 		if stepExec != nil && stepExec.Status == WorkflowStatusCompleted {
 			// 步骤已完成但字段不存在
-			return nil, fmt.Errorf("field %s.%s not found (step completed)", stepID, fieldPath)
+			return nil, apperr.NotFoundf("field %s.%s not found (step completed)", stepID, fieldPath).WithCode("workflow_field_not_found")
 		}
 
 		if stepExec != nil && stepExec.Status == WorkflowStatusFailed {
 			// 步骤失败
-			return nil, fmt.Errorf("step %s failed, field unavailable", stepID)
+			return nil, apperr.Conflictf("step %s failed, field unavailable", stepID).WithCode("workflow_field_unavailable")
 		}
 
 		// 检查超时
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("timeout waiting for field %s.%s", stepID, fieldPath)
+			return nil, apperr.Conflictf("timeout waiting for field %s.%s", stepID, fieldPath).WithCode("workflow_field_wait_timeout")
 		}
 
 		// 等待通知或超时

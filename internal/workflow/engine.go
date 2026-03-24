@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/agent"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/monitor"
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/apperr"
 )
 
 // Engine executes workflows
@@ -21,6 +24,7 @@ type Engine struct {
 	eventPublisher EventPublisher
 	defaultTimeout time.Duration
 	maxConcurrency int // Max parallel steps per workflow
+	metrics        *monitor.WorkflowMetrics
 }
 
 // EventPublisher publishes workflow events
@@ -55,6 +59,10 @@ func NewEngine(config EngineConfig) *Engine {
 		defaultTimeout: config.DefaultTimeout,
 		maxConcurrency: config.MaxConcurrency,
 	}
+}
+
+func (e *Engine) SetMetrics(metrics *monitor.WorkflowMetrics) {
+	e.metrics = metrics
 }
 
 type StepDecision string
@@ -97,18 +105,21 @@ func (e *Engine) Execute(ctx context.Context, workflow *Workflow, variables map[
 	e.executionCache[execution.ID] = execution
 	e.mu.Unlock()
 
-	runCtx, cancel := context.WithCancel(ctx)
+	// Workflow execution is asynchronous and must outlive the HTTP request context.
+	// Keep context values, but detach from request cancellation.
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	e.registerExecutionStop(execution.ID, cancel)
 
 	// Save to repository if available
-	if err := e.persistWorkflowDefinition(workflow); err != nil {
+	if err := e.persistWorkflowDefinition(ctx, workflow); err != nil {
 		return nil, fmt.Errorf("failed to save workflow definition: %w", err)
 	}
-	if err := e.persistExecutionSnapshot(execution); err != nil {
+	if err := e.persistExecutionSnapshot(ctx, execution); err != nil {
 		return nil, fmt.Errorf("failed to save execution: %w", err)
 	}
 
 	// Publish start event
+	e.observeWorkflowStarted(workflow)
 	e.publishEvent(execution.ID, "workflow_started", string(WorkflowStatusRunning), "Workflow execution started", nil)
 
 	// Execute workflow in background
@@ -291,7 +302,7 @@ func (e *Engine) evaluateCondition(cond *Condition, ctx *ExecutionContext, compl
 		return engine.EvaluateCondition(cond.Expression)
 
 	default:
-		return false, fmt.Errorf("unknown condition type: %s", cond.Type)
+		return false, apperr.InvalidArgumentf("unknown condition type: %s", cond.Type).WithCode("workflow_condition_type_invalid")
 	}
 }
 
@@ -316,7 +327,7 @@ func (e *Engine) routeAllowsStep(workflow *Workflow, step *Step, execution *Work
 		}
 		if !allowed {
 			if selectedRoute == "" {
-				return false, "", fmt.Errorf("route step %s completed without selection", depID)
+				return false, "", apperr.Internalf("route step %s completed without selection", depID).WithCode("workflow_route_selection_missing")
 			}
 			return false, fmt.Sprintf("route_filtered:%s=%s", depID, selectedRoute), nil
 		}
@@ -394,17 +405,20 @@ func (e *Engine) executeStep(ctx context.Context, step *Step, execution *Workflo
 		StepID:    step.ID,
 		Status:    WorkflowStatusRunning,
 		StartedAt: time.Now(),
-		Metadata:  make(map[string]interface{}),
+		Metadata: map[string]interface{}{
+			"step_type": workflowStepType(step),
+		},
 	}
 
 	e.mu.Lock()
 	execution.StepExecutions[step.ID] = stepExec
 	execution.CurrentStep = step.ID
 	e.mu.Unlock()
-	_ = e.persistExecutionSnapshot(execution)
+	_ = e.persistExecutionSnapshot(context.Background(), execution)
 
 	e.publishEvent(execution.ID, "step_started", string(WorkflowStatusRunning),
 		fmt.Sprintf("Step %s started", step.ID), map[string]interface{}{"step_id": step.ID})
+	e.observeStepStarted(execution.WorkflowID, step, stepExec)
 
 	if step.Foreach != nil {
 		return e.executeForeachStep(ctx, step, execution, stepExec)
@@ -414,7 +428,7 @@ func (e *Engine) executeStep(ctx context.Context, step *Step, execution *Workflo
 	engine := NewTemplateEngine(execution.Context)
 	renderedParams, err := engine.RenderParameters(step.Parameters)
 	if err != nil {
-		return e.failStep(stepExec, execution, fmt.Errorf("failed to render parameters: %w", err))
+		return e.failStep(stepExec, execution, apperr.InvalidArgument("failed to render parameters").WithCode("workflow_step_params_render_failed").WithCause(err))
 	}
 
 	// Execute step with retries
@@ -447,7 +461,7 @@ func (e *Engine) executeStep(ctx context.Context, step *Step, execution *Workflo
 		// Get agent
 		ag, err := e.agentRegistry.Get(step.AgentName)
 		if err != nil {
-			lastErr = fmt.Errorf("agent not found: %s", step.AgentName)
+			lastErr = apperr.NotFoundf("agent not found: %s", step.AgentName).WithCode("workflow_step_agent_not_found")
 			continue
 		}
 
@@ -468,7 +482,7 @@ func (e *Engine) executeStep(ctx context.Context, step *Step, execution *Workflo
 
 		//执行失败，进行重试
 		if !output.Success {
-			lastErr = fmt.Errorf("step execution failed: %s", output.Error)
+			lastErr = apperr.Internalf("step execution failed: %s", output.Error).WithCode("workflow_step_execution_failed")
 			continue
 		}
 
@@ -490,16 +504,17 @@ func (e *Engine) executeStep(ctx context.Context, step *Step, execution *Workflo
 		if step.Route != nil {
 			selectedRoute, targets, err := e.applyRouteSelection(step, execution)
 			if err != nil {
-				return e.failStep(stepExec, execution, fmt.Errorf("failed to apply route selection: %w", err))
+				return e.failStep(stepExec, execution, apperr.Internal("failed to apply route selection").WithCode("workflow_route_apply_failed").WithCause(err))
 			}
 			stepExec.Metadata["route"] = selectedRoute
 			stepExec.Metadata["route_targets"] = targets
 		}
-		_ = e.persistExecutionSnapshot(execution)
+		_ = e.persistExecutionSnapshot(ctx, execution)
 
 		e.publishEvent(execution.ID, "step_completed", string(WorkflowStatusCompleted),
 			fmt.Sprintf("Step %s completed successfully", step.ID),
 			map[string]interface{}{"step_id": step.ID, "result": output.Result})
+		e.observeStepFinished(execution.WorkflowID, stepExec, string(WorkflowStatusCompleted))
 
 		//执行成功返回nil，跳出重试
 		return nil
@@ -517,7 +532,7 @@ func (e *Engine) executeForeachStep(
 ) error {
 	items, err := e.resolveForeachItems(step, execution)
 	if err != nil {
-		return e.failStep(stepExec, execution, fmt.Errorf("failed to resolve foreach items: %w", err))
+		return e.failStep(stepExec, execution, apperr.InvalidArgument("failed to resolve foreach items").WithCode("workflow_foreach_resolve_failed").WithCause(err))
 	}
 
 	maxRetries := step.Retries
@@ -559,12 +574,12 @@ func (e *Engine) executeForeachStep(
 		if step.Route != nil {
 			selectedRoute, targets, err := e.applyRouteSelection(step, execution)
 			if err != nil {
-				return e.failStep(stepExec, execution, fmt.Errorf("failed to apply route selection: %w", err))
+				return e.failStep(stepExec, execution, apperr.Internal("failed to apply route selection").WithCode("workflow_route_apply_failed").WithCause(err))
 			}
 			stepExec.Metadata["route"] = selectedRoute
 			stepExec.Metadata["route_targets"] = targets
 		}
-		_ = e.persistExecutionSnapshot(execution)
+		_ = e.persistExecutionSnapshot(ctx, execution)
 
 		e.publishEvent(execution.ID, "step_completed", string(WorkflowStatusCompleted),
 			fmt.Sprintf("Step %s completed successfully", step.ID),
@@ -574,6 +589,7 @@ func (e *Engine) executeForeachStep(
 				"item_count": len(results),
 				"foreach":    true,
 			})
+		e.observeStepFinished(execution.WorkflowID, stepExec, string(WorkflowStatusCompleted))
 
 		return nil
 	}
@@ -604,7 +620,7 @@ func (e *Engine) resolveForeachItems(step *Step, execution *WorkflowExecution) (
 		}
 		return out, nil
 	default:
-		return nil, fmt.Errorf("foreach.from must resolve to an array, got %T", resolved)
+		return nil, apperr.InvalidArgumentf("foreach.from must resolve to an array, got %T", resolved).WithCode("workflow_foreach_input_invalid")
 	}
 }
 
@@ -675,7 +691,7 @@ func (e *Engine) executeForeachItem(
 	templateEngine := NewTemplateEngine(localCtx)
 	renderedParams, err := templateEngine.RenderParameters(step.Parameters)
 	if err != nil {
-		return nil, fmt.Errorf("failed to render foreach item parameters: %w", err)
+		return nil, apperr.InvalidArgument("failed to render foreach item parameters").WithCode("workflow_foreach_params_render_failed").WithCause(err)
 	}
 
 	taskInput := &agent.TaskInput{
@@ -688,7 +704,7 @@ func (e *Engine) executeForeachItem(
 
 	ag, err := e.agentRegistry.Get(step.AgentName)
 	if err != nil {
-		return nil, fmt.Errorf("agent not found: %s", step.AgentName)
+		return nil, apperr.NotFoundf("agent not found: %s", step.AgentName).WithCode("workflow_step_agent_not_found")
 	}
 
 	stepCtx := ctx
@@ -703,7 +719,7 @@ func (e *Engine) executeForeachItem(
 		return nil, err
 	}
 	if !output.Success {
-		return nil, fmt.Errorf("step execution failed: %s", output.Error)
+		return nil, apperr.Internalf("step execution failed: %s", output.Error).WithCode("workflow_step_execution_failed")
 	}
 
 	if output.Result == nil {
@@ -763,13 +779,14 @@ func (e *Engine) skipStep(step *Step, execution *WorkflowExecution, reason strin
 		CompletedAt: &now,
 		Metadata: map[string]interface{}{
 			"skip_reason": reason,
+			"step_type":   workflowStepType(step),
 		},
 	}
 
 	e.mu.Lock()
 	execution.StepExecutions[step.ID] = stepExec
 	e.mu.Unlock()
-	_ = e.persistExecutionSnapshot(execution)
+	_ = e.persistExecutionSnapshot(context.Background(), execution)
 
 	e.publishEvent(execution.ID, "step_skipped", string(WorkflowStatusSkipped),
 		fmt.Sprintf("Step %s skipped", step.ID),
@@ -777,19 +794,33 @@ func (e *Engine) skipStep(step *Step, execution *WorkflowExecution, reason strin
 			"step_id": step.ID,
 			"reason":  reason,
 		})
+	if e.metrics != nil {
+		e.metrics.ObserveStepSkipped(execution.WorkflowID, step.ID, reason)
+	}
 }
 
 // failStep marks a step as failed
 func (e *Engine) failStep(stepExec *StepExecution, execution *WorkflowExecution, err error) error {
 	stepExec.Status = WorkflowStatusFailed
 	stepExec.Error = err.Error()
+	if stepExec.Metadata == nil {
+		stepExec.Metadata = make(map[string]interface{})
+	}
+	var appErr *apperr.Error
+	if errors.As(err, &appErr) && appErr.Code != "" {
+		stepExec.Metadata["error_code"] = appErr.Code
+	}
 	now := time.Now()
 	stepExec.CompletedAt = &now
-	_ = e.persistExecutionSnapshot(execution)
+	_ = e.persistExecutionSnapshot(context.Background(), execution)
 
 	e.publishEvent(execution.ID, "step_failed", string(WorkflowStatusFailed),
 		fmt.Sprintf("Step %s failed: %v", stepExec.StepID, err),
 		map[string]interface{}{"step_id": stepExec.StepID, "error": err.Error()})
+	if e.metrics != nil {
+		e.metrics.ObserveStepFailed(execution.WorkflowID, stepExec.StepID)
+	}
+	e.observeStepFinished(execution.WorkflowID, stepExec, string(WorkflowStatusFailed))
 
 	return err
 }
@@ -822,7 +853,13 @@ func (e *Engine) finishExecution(execution *WorkflowExecution, status WorkflowSt
 	delete(e.executionStops, execution.ID)
 	e.mu.Unlock()
 
-	_ = e.persistExecutionSnapshot(execution)
+	_ = e.persistExecutionSnapshot(context.Background(), execution)
+	if status == WorkflowStatusCancelled && e.metrics != nil {
+		e.metrics.ObserveCancel(execution.WorkflowID)
+	}
+	if e.metrics != nil {
+		e.metrics.ObserveWorkflowFinished(execution.WorkflowID, string(status), now.Sub(execution.StartedAt))
+	}
 
 	e.publishEvent(execution.ID, "workflow_completed", string(status), message, nil)
 }
@@ -842,7 +879,7 @@ func (e *Engine) SetEventPublisher(publisher EventPublisher) {
 }
 
 // GetExecution retrieves a workflow execution by ID
-func (e *Engine) GetExecution(executionID string) (*WorkflowExecution, error) {
+func (e *Engine) GetExecution(ctx context.Context, executionID string) (*WorkflowExecution, error) {
 	e.mu.RLock()
 	execution, exists := e.executionCache[executionID]
 	e.mu.RUnlock()
@@ -853,31 +890,34 @@ func (e *Engine) GetExecution(executionID string) (*WorkflowExecution, error) {
 
 	// Try to load from repository
 	if e.repository != nil {
-		return e.repository.GetExecution(executionID)
+		return e.repository.GetExecution(ctx, executionID)
 	}
 
-	return nil, fmt.Errorf("execution not found: %s", executionID)
+	return nil, apperr.NotFoundf("execution not found: %s", executionID).WithCode("execution_not_found")
 }
 
 // CancelExecution cancels a running workflow execution
-func (e *Engine) CancelExecution(executionID string) error {
-	execution, err := e.GetExecution(executionID)
+func (e *Engine) CancelExecution(ctx context.Context, executionID string) error {
+	execution, err := e.GetExecution(ctx, executionID)
 	if err != nil {
 		return err
 	}
 
 	if execution.Status != WorkflowStatusRunning {
-		return fmt.Errorf("execution is not running")
+		return apperr.Conflict("execution is not running").WithCode("execution_cancel_conflict")
 	}
 
 	e.mu.RLock()
 	cancel := e.executionStops[executionID]
 	e.mu.RUnlock()
 	if cancel == nil {
-		return fmt.Errorf("execution cancel function not found")
+		return apperr.Internal("execution cancel function not found").WithCode("execution_cancel_unavailable")
 	}
 
 	cancel()
+	if e.metrics != nil {
+		e.metrics.ObserveCancel(execution.WorkflowID)
+	}
 	return nil
 }
 
@@ -887,28 +927,28 @@ func (e *Engine) registerExecutionStop(executionID string, cancel context.Cancel
 	e.executionStops[executionID] = cancel
 }
 
-func (e *Engine) persistWorkflowDefinition(workflow *Workflow) error {
+func (e *Engine) persistWorkflowDefinition(ctx context.Context, workflow *Workflow) error {
 	if e.repository == nil || workflow == nil {
 		return nil
 	}
-	return e.repository.SaveWorkflow(workflow)
+	return e.repository.SaveWorkflow(ctx, workflow)
 }
 
-func (e *Engine) persistExecutionSnapshot(execution *WorkflowExecution) error {
+func (e *Engine) persistExecutionSnapshot(ctx context.Context, execution *WorkflowExecution) error {
 	if e.repository == nil || execution == nil {
 		return nil
 	}
-	return e.repository.SaveExecution(execution)
+	return e.repository.SaveExecution(ctx, execution)
 }
 
 // RecoverRunningExecutions marks unfinished executions as interrupted after a restart
 // and repopulates the in-memory execution cache.
-func (e *Engine) RecoverRunningExecutions() (int, error) {
+func (e *Engine) RecoverRunningExecutions(ctx context.Context) (int, error) {
 	if e.repository == nil {
 		return 0, nil
 	}
 
-	runningExecutions, err := e.repository.GetRunningExecutions()
+	runningExecutions, err := e.repository.GetRunningExecutions(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("failed to load running executions: %w", err)
 	}
@@ -929,12 +969,57 @@ func (e *Engine) RecoverRunningExecutions() (int, error) {
 		now := time.Now()
 		execution.CompletedAt = &now
 
-		if err := e.persistExecutionSnapshot(execution); err != nil {
+		if err := e.persistExecutionSnapshot(ctx, execution); err != nil {
 			return recovered, fmt.Errorf("failed to persist interrupted execution %s: %w", execution.ID, err)
+		}
+		if e.metrics != nil {
+			e.metrics.ObserveRecovery(execution.WorkflowID, string(execution.RecoveryStatus))
 		}
 
 		recovered++
 	}
 
 	return recovered, nil
+}
+
+func workflowStepType(step *Step) string {
+	if step == nil {
+		return "unknown"
+	}
+	if step.Streaming != nil && step.Streaming.Enabled {
+		return "streaming"
+	}
+	if step.Foreach != nil {
+		return "foreach"
+	}
+	return "standard"
+}
+
+func (e *Engine) observeWorkflowStarted(workflow *Workflow) {
+	if e.metrics == nil || workflow == nil {
+		return
+	}
+	e.metrics.ObserveWorkflowStarted(workflow.ID)
+}
+
+func (e *Engine) observeStepStarted(workflowID string, step *Step, stepExec *StepExecution) {
+	if e.metrics == nil || step == nil || stepExec == nil {
+		return
+	}
+	e.metrics.ObserveStepStarted(workflowID, step.ID, workflowStepType(step))
+}
+
+func (e *Engine) observeStepFinished(workflowID string, stepExec *StepExecution, status string) {
+	if e.metrics == nil || stepExec == nil {
+		return
+	}
+	completedAt := time.Now()
+	if stepExec.CompletedAt != nil {
+		completedAt = *stepExec.CompletedAt
+	}
+	stepType, _ := stepExec.Metadata["step_type"].(string)
+	if stepType == "" {
+		stepType = "unknown"
+	}
+	e.metrics.ObserveStepFinished(workflowID, stepExec.StepID, stepType, status, completedAt.Sub(stepExec.StartedAt))
 }

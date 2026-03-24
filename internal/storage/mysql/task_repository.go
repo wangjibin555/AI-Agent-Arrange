@@ -1,12 +1,14 @@
 package mysql
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/orchestrator"
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/apperr"
 )
 
 // TaskRepository handles task persistence
@@ -20,7 +22,7 @@ func NewTaskRepository(db *DB) *TaskRepository {
 }
 
 // Create creates a new task in the database
-func (r *TaskRepository) Create(task *orchestrator.Task) error {
+func (r *TaskRepository) Create(ctx context.Context, task *orchestrator.Task) error {
 	parametersJSON, err := json.Marshal(task.Parameters)
 	if err != nil {
 		return fmt.Errorf("failed to marshal parameters: %w", err)
@@ -35,7 +37,7 @@ func (r *TaskRepository) Create(task *orchestrator.Task) error {
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
-	_, err = r.db.Exec(query,
+	_, err = r.db.ExecWithContext(ctx, query,
 		task.ID,
 		task.AgentName,
 		task.RequiredCapability,
@@ -56,7 +58,7 @@ func (r *TaskRepository) Create(task *orchestrator.Task) error {
 }
 
 // Update updates an existing task
-func (r *TaskRepository) Update(task *orchestrator.Task) error {
+func (r *TaskRepository) Update(ctx context.Context, task *orchestrator.Task) error {
 	var resultJSON []byte
 	var err error
 
@@ -79,7 +81,7 @@ func (r *TaskRepository) Update(task *orchestrator.Task) error {
 		WHERE id = ?
 	`
 
-	_, err = r.db.Exec(query,
+	_, err = r.db.ExecWithContext(ctx, query,
 		task.AgentName,
 		task.Status,
 		resultJSON,
@@ -98,7 +100,7 @@ func (r *TaskRepository) Update(task *orchestrator.Task) error {
 }
 
 // GetByID retrieves a task by ID
-func (r *TaskRepository) GetByID(id string) (*orchestrator.Task, error) {
+func (r *TaskRepository) GetByID(ctx context.Context, id string) (*orchestrator.Task, error) {
 	query := `
 		SELECT
 			id, agent_name, required_capability, action, parameters,
@@ -108,7 +110,7 @@ func (r *TaskRepository) GetByID(id string) (*orchestrator.Task, error) {
 		WHERE id = ?
 	`
 
-	row := r.db.QueryRow(query, id)
+	row := r.db.QueryRowWithContext(ctx, query, id)
 
 	var task orchestrator.Task
 	var parametersJSON, resultJSON []byte
@@ -133,7 +135,7 @@ func (r *TaskRepository) GetByID(id string) (*orchestrator.Task, error) {
 	)
 
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("task not found: %s", id)
+		return nil, apperr.NotFoundf("task not found: %s", id).WithCode("task_not_found")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan task: %w", err)
@@ -168,6 +170,10 @@ type TaskFilter struct {
 
 // List retrieves tasks with filters
 func (r *TaskRepository) List(filter TaskFilter) ([]*orchestrator.Task, int, error) {
+	return r.listWithContext(context.Background(), filter)
+}
+
+func (r *TaskRepository) listWithContext(ctx context.Context, filter TaskFilter) ([]*orchestrator.Task, int, error) {
 	// Build query
 	query := `
 		SELECT
@@ -194,7 +200,7 @@ func (r *TaskRepository) List(filter TaskFilter) ([]*orchestrator.Task, int, err
 
 	// Get total count
 	var total int
-	err := r.db.QueryRow(countQuery, args...).Scan(&total)
+	err := r.db.QueryRowWithContext(ctx, countQuery, args...).Scan(&total)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to count tasks: %w", err)
 	}
@@ -204,7 +210,7 @@ func (r *TaskRepository) List(filter TaskFilter) ([]*orchestrator.Task, int, err
 	args = append(args, filter.Limit, filter.Offset)
 
 	// Execute query
-	rows, err := r.db.Query(query, args...)
+	rows, err := r.db.QueryWithContext(ctx, query, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to query tasks: %w", err)
 	}
@@ -264,8 +270,8 @@ func (r *TaskRepository) List(filter TaskFilter) ([]*orchestrator.Task, int, err
 }
 
 // GetPendingTasks retrieves all pending tasks
-func (r *TaskRepository) GetPendingTasks() ([]*orchestrator.Task, error) {
-	tasks, _, err := r.List(TaskFilter{
+func (r *TaskRepository) GetPendingTasks(ctx context.Context) ([]*orchestrator.Task, error) {
+	tasks, _, err := r.listWithContext(ctx, TaskFilter{
 		Status: orchestrator.TaskStatusPending,
 		Limit:  1000, // Get up to 1000 pending tasks
 		Offset: 0,
@@ -274,8 +280,8 @@ func (r *TaskRepository) GetPendingTasks() ([]*orchestrator.Task, error) {
 }
 
 // GetRunningTasks retrieves all running tasks
-func (r *TaskRepository) GetRunningTasks() ([]*orchestrator.Task, error) {
-	tasks, _, err := r.List(TaskFilter{
+func (r *TaskRepository) GetRunningTasks(ctx context.Context) ([]*orchestrator.Task, error) {
+	tasks, _, err := r.listWithContext(ctx, TaskFilter{
 		Status: orchestrator.TaskStatusRunning,
 		Limit:  1000,
 		Offset: 0,
@@ -286,7 +292,7 @@ func (r *TaskRepository) GetRunningTasks() ([]*orchestrator.Task, error) {
 // Delete deletes a task by ID
 func (r *TaskRepository) Delete(id string) error {
 	query := "DELETE FROM tasks WHERE id = ?"
-	_, err := r.db.Exec(query, id)
+	_, err := r.db.ExecWithContext(context.Background(), query, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete task: %w", err)
 	}
@@ -298,7 +304,7 @@ func (r *TaskRepository) DeleteOldTasks(olderThan time.Duration) (int64, error) 
 	query := "DELETE FROM tasks WHERE created_at < ?"
 	cutoffTime := time.Now().Add(-olderThan)
 
-	result, err := r.db.Exec(query, cutoffTime)
+	result, err := r.db.ExecWithContext(context.Background(), query, cutoffTime)
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete old tasks: %w", err)
 	}

@@ -32,7 +32,7 @@ func newTestEngine(t *testing.T, publisher EventPublisher) (*Engine, *integratio
 func waitForBaseExecution(engine *Engine, executionID string) (*WorkflowExecution, error) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		exec, err := engine.GetExecution(executionID)
+		exec, err := engine.GetExecution(context.Background(), executionID)
 		if err != nil {
 			return nil, err
 		}
@@ -218,5 +218,85 @@ func TestStreamingEngine_DynamicRouteExecutesSelectedBranch(t *testing.T) {
 	}
 	if !publisher.hasEvent("step_skipped", "slow_path") {
 		t.Fatalf("expected step_skipped event for slow_path")
+	}
+}
+
+func TestEngine_RuntimeFailureStoresStructuredErrorCode(t *testing.T) {
+	publisher := &recordingWorkflowEventPublisher{}
+	engine, _ := newTestEngine(t, publisher)
+
+	workflowDef := &Workflow{
+		ID:   "runtime-error-code",
+		Name: "Runtime Error Code",
+		Steps: []*Step{
+			{
+				ID:        "missing_agent_step",
+				AgentName: "missing-agent",
+				Action:    "echo",
+			},
+		},
+	}
+
+	execution, err := engine.Execute(context.Background(), workflowDef, nil)
+	if err != nil {
+		t.Fatalf("execute workflow: %v", err)
+	}
+
+	exec, err := waitForBaseExecution(engine, execution.ID)
+	if err != nil {
+		t.Fatalf("wait for execution: %v", err)
+	}
+	if exec.Status != WorkflowStatusFailed {
+		t.Fatalf("expected failed workflow, got %s (%s)", exec.Status, exec.Error)
+	}
+
+	stepExec := exec.StepExecutions["missing_agent_step"]
+	if stepExec == nil {
+		t.Fatal("expected step execution record")
+	}
+	if stepExec.Metadata["error_code"] != "workflow_step_agent_not_found" {
+		t.Fatalf("unexpected error code metadata: %#v", stepExec.Metadata)
+	}
+}
+
+func TestStreamingEngine_RuntimeFailureStoresStructuredErrorCode(t *testing.T) {
+	publisher := &recordingWorkflowEventPublisher{}
+	engine, _ := newTestStreamingEngine(t, publisher)
+
+	workflowDef := &Workflow{
+		ID:   "runtime-streaming-error-code",
+		Name: "Runtime Streaming Error Code",
+		Steps: []*Step{
+			{
+				ID:        "missing_agent_stream_step",
+				AgentName: "missing-agent",
+				Action:    "stream_text",
+				Streaming: &StreamingConfig{
+					Enabled: true,
+					WaitFor: "full",
+				},
+			},
+		},
+	}
+
+	execution, err := engine.Execute(context.Background(), workflowDef, nil)
+	if err != nil {
+		t.Fatalf("execute workflow: %v", err)
+	}
+
+	exec, err := waitForExecution(engine, execution.ID)
+	if err != nil {
+		t.Fatalf("wait for execution: %v", err)
+	}
+	if exec.Status != WorkflowStatusFailed {
+		t.Fatalf("expected failed workflow, got %s (%s)", exec.Status, exec.Error)
+	}
+
+	stepExec := exec.StepExecutions["missing_agent_stream_step"]
+	if stepExec == nil {
+		t.Fatal("expected step execution record")
+	}
+	if stepExec.Metadata["error_code"] != "workflow_step_agent_not_found" {
+		t.Fatalf("unexpected error code metadata: %#v", stepExec.Metadata)
 	}
 }

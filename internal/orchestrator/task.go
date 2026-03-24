@@ -9,6 +9,7 @@ type Task struct {
 	RequiredCapability string                 `json:"required_capability,omitempty"` // 任务需要的能力（用于自动选择 Agent）
 	Action             string                 `json:"action"`                        // 任务动作类型（如 translate, query, search 等）
 	Parameters         map[string]interface{} `json:"parameters"`                    // 任务参数（动作相关的输入数据）
+	RequestMetadata    map[string]string      `json:"request_metadata,omitempty"`    // 请求链路透传元数据
 	Dependencies       []string               `json:"dependencies,omitempty"`        // 依赖的任务 ID 列表（未实现）
 	Priority           int                    `json:"priority"`                      // 任务优先级（数值越大优先级越高，未实现）
 	Timeout            time.Duration          `json:"timeout"`                       // 任务执行超时时间

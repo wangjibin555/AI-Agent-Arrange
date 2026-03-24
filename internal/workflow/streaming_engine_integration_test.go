@@ -422,7 +422,7 @@ func newTestStreamingEngine(t *testing.T, publisher EventPublisher) (*StreamingE
 func waitForExecution(engine *StreamingEngine, executionID string) (*WorkflowExecution, error) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		exec, err := engine.GetExecution(executionID)
+		exec, err := engine.GetExecution(context.Background(), executionID)
 		if err != nil {
 			return nil, fmt.Errorf("get execution %s: %w", executionID, err)
 		}

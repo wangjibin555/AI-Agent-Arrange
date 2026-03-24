@@ -1,8 +1,11 @@
 package workflow
 
 import (
+	"context"
 	"fmt"
 	"sync"
+
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/apperr"
 )
 
 // MemoryRepository is an in-memory implementation of Repository
@@ -22,7 +25,7 @@ func NewMemoryRepository() *MemoryRepository {
 }
 
 // SaveWorkflow saves a workflow
-func (r *MemoryRepository) SaveWorkflow(workflow *Workflow) error {
+func (r *MemoryRepository) SaveWorkflow(_ context.Context, workflow *Workflow) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -32,7 +35,7 @@ func (r *MemoryRepository) SaveWorkflow(workflow *Workflow) error {
 }
 
 // GetWorkflow retrieves a workflow by ID
-func (r *MemoryRepository) GetWorkflow(id string) (*Workflow, error) {
+func (r *MemoryRepository) GetWorkflow(_ context.Context, id string) (*Workflow, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -45,7 +48,7 @@ func (r *MemoryRepository) GetWorkflow(id string) (*Workflow, error) {
 }
 
 // ListWorkflows returns all workflows
-func (r *MemoryRepository) ListWorkflows() ([]*Workflow, error) {
+func (r *MemoryRepository) ListWorkflows(_ context.Context) ([]*Workflow, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -58,7 +61,7 @@ func (r *MemoryRepository) ListWorkflows() ([]*Workflow, error) {
 }
 
 // DeleteWorkflow deletes a workflow
-func (r *MemoryRepository) DeleteWorkflow(id string) error {
+func (r *MemoryRepository) DeleteWorkflow(_ context.Context, id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -71,7 +74,7 @@ func (r *MemoryRepository) DeleteWorkflow(id string) error {
 }
 
 // SaveExecution saves a workflow execution
-func (r *MemoryRepository) SaveExecution(execution *WorkflowExecution) error {
+func (r *MemoryRepository) SaveExecution(_ context.Context, execution *WorkflowExecution) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -80,20 +83,20 @@ func (r *MemoryRepository) SaveExecution(execution *WorkflowExecution) error {
 }
 
 // GetExecution retrieves an execution by ID
-func (r *MemoryRepository) GetExecution(id string) (*WorkflowExecution, error) {
+func (r *MemoryRepository) GetExecution(_ context.Context, id string) (*WorkflowExecution, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	execution, exists := r.executions[id]
 	if !exists {
-		return nil, fmt.Errorf("execution not found: %s", id)
+		return nil, apperr.NotFoundf("execution not found: %s", id).WithCode("execution_not_found")
 	}
 
 	return execution, nil
 }
 
 // ListExecutions returns all executions for a workflow
-func (r *MemoryRepository) ListExecutions(workflowID string) ([]*WorkflowExecution, error) {
+func (r *MemoryRepository) ListExecutions(_ context.Context, workflowID string) ([]*WorkflowExecution, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -108,7 +111,7 @@ func (r *MemoryRepository) ListExecutions(workflowID string) ([]*WorkflowExecuti
 }
 
 // GetRunningExecutions returns all currently running executions
-func (r *MemoryRepository) GetRunningExecutions() ([]*WorkflowExecution, error) {
+func (r *MemoryRepository) GetRunningExecutions(_ context.Context) ([]*WorkflowExecution, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 

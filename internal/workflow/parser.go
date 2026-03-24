@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/apperr"
 	"gopkg.in/yaml.v3"
 )
 
@@ -25,6 +26,11 @@ type ValidationReport struct {
 // NewParser creates a new workflow parser
 func NewParser() *Parser {
 	return &Parser{}
+}
+
+// ValidateDefinition validates a workflow definition using the same rules as parser input handling.
+func ValidateDefinition(wf *Workflow) error {
+	return NewParser().validate(wf)
 }
 
 // Warnings returns non-fatal validation warnings from the last parse.
@@ -46,7 +52,7 @@ func (p *Parser) ParseYAML(content []byte) (*Workflow, error) {
 
 	var wf Workflow
 	if err := yaml.Unmarshal(content, &wf); err != nil {
-		return nil, fmt.Errorf("failed to parse YAML: %w", err)
+		return nil, apperr.InvalidArgument("failed to parse YAML").WithCode("workflow_yaml_invalid").WithCause(err)
 	}
 
 	if err := p.validate(&wf); err != nil {
@@ -62,7 +68,7 @@ func (p *Parser) ParseJSON(content []byte) (*Workflow, error) {
 
 	var wf Workflow
 	if err := json.Unmarshal(content, &wf); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON: %w", err)
+		return nil, apperr.InvalidArgument("failed to parse JSON").WithCode("workflow_json_invalid").WithCause(err)
 	}
 
 	if err := p.validate(&wf); err != nil {
@@ -95,11 +101,11 @@ func (p *Parser) ParseJSONFile(filepath string) (*Workflow, error) {
 // validate validates a workflow definition
 func (p *Parser) validate(wf *Workflow) error {
 	if wf.Name == "" {
-		return fmt.Errorf("workflow name is required")
+		return apperr.InvalidArgument("workflow name is required").WithCode("workflow_name_required")
 	}
 
 	if len(wf.Steps) == 0 {
-		return fmt.Errorf("workflow must have at least one step")
+		return apperr.InvalidArgument("workflow must have at least one step").WithCode("workflow_steps_required")
 	}
 
 	// Validate steps
@@ -107,27 +113,27 @@ func (p *Parser) validate(wf *Workflow) error {
 	stepMap := make(map[string]*Step)
 	for _, step := range wf.Steps {
 		if step.ID == "" {
-			return fmt.Errorf("step ID is required")
+			return apperr.InvalidArgument("step ID is required").WithCode("workflow_step_id_required")
 		}
 
 		if stepIDs[step.ID] {
-			return fmt.Errorf("duplicate step ID: %s", step.ID)
+			return apperr.InvalidArgumentf("duplicate step ID: %s", step.ID).WithCode("workflow_step_id_duplicate")
 		}
 		stepIDs[step.ID] = true
 		stepMap[step.ID] = step
 
 		if step.AgentName == "" {
-			return fmt.Errorf("step %s: agent name is required", step.ID)
+			return apperr.InvalidArgumentf("step %s: agent name is required", step.ID).WithCode("workflow_step_agent_required")
 		}
 
 		if step.Action == "" {
-			return fmt.Errorf("step %s: action is required", step.ID)
+			return apperr.InvalidArgumentf("step %s: action is required", step.ID).WithCode("workflow_step_action_required")
 		}
 
 		// Validate dependencies exist
 		for _, depID := range step.DependsOn {
 			if !stepIDs[depID] && !p.willExist(depID, wf.Steps) {
-				return fmt.Errorf("step %s depends on non-existent step: %s", step.ID, depID)
+				return apperr.InvalidArgumentf("step %s depends on non-existent step: %s", step.ID, depID).WithCode("workflow_dependency_not_found")
 			}
 		}
 	}
@@ -145,7 +151,7 @@ func (p *Parser) validate(wf *Workflow) error {
 
 	// Validate DAG structure (no cycles)
 	if _, err := NewDAG(wf.Steps); err != nil {
-		return fmt.Errorf("invalid workflow structure: %w", err)
+		return apperr.InvalidArgument("invalid workflow structure").WithCode("workflow_structure_invalid").WithCause(err)
 	}
 
 	return nil
@@ -168,10 +174,10 @@ func (p *Parser) validateRoute(step *Step, stepMap map[string]*Step) error {
 		return nil
 	}
 	if step.Route.Expression == "" {
-		return fmt.Errorf("step %s: route expression is required", step.ID)
+		return apperr.InvalidArgumentf("step %s: route expression is required", step.ID).WithCode("workflow_route_expression_required")
 	}
 	if len(step.Route.Cases) == 0 && len(step.Route.Default) == 0 {
-		return fmt.Errorf("step %s: route must define at least one case or default target", step.ID)
+		return apperr.InvalidArgumentf("step %s: route must define at least one case or default target", step.ID).WithCode("workflow_route_targets_required")
 	}
 
 	seenTargets := make(map[string]string)
@@ -179,13 +185,13 @@ func (p *Parser) validateRoute(step *Step, stepMap map[string]*Step) error {
 		for _, targetID := range targets {
 			target, ok := stepMap[targetID]
 			if !ok {
-				return fmt.Errorf("step %s: route target does not exist: %s", step.ID, targetID)
+				return apperr.InvalidArgumentf("step %s: route target does not exist: %s", step.ID, targetID).WithCode("workflow_route_target_not_found")
 			}
 			if !slices.Contains(target.DependsOn, step.ID) {
-				return fmt.Errorf("step %s: route target %s must depend on router step", step.ID, targetID)
+				return apperr.InvalidArgumentf("step %s: route target %s must depend on router step", step.ID, targetID).WithCode("workflow_route_target_dependency_invalid")
 			}
 			if previousKey, exists := seenTargets[targetID]; exists {
-				return fmt.Errorf("step %s: route target %s is duplicated in %s and %s", step.ID, targetID, previousKey, routeKey)
+				return apperr.InvalidArgumentf("step %s: route target %s is duplicated in %s and %s", step.ID, targetID, previousKey, routeKey).WithCode("workflow_route_target_duplicate")
 			}
 			seenTargets[targetID] = routeKey
 		}
@@ -209,16 +215,16 @@ func (p *Parser) validateForeach(step *Step) error {
 		return nil
 	}
 	if step.Foreach.From == "" {
-		return fmt.Errorf("step %s: foreach.from is required", step.ID)
+		return apperr.InvalidArgumentf("step %s: foreach.from is required", step.ID).WithCode("workflow_foreach_from_required")
 	}
 	if step.Foreach.ItemAs != "" && step.Foreach.IndexAs != "" && step.Foreach.ItemAs == step.Foreach.IndexAs {
-		return fmt.Errorf("step %s: foreach.item_as and foreach.index_as must be different", step.ID)
+		return apperr.InvalidArgumentf("step %s: foreach.item_as and foreach.index_as must be different", step.ID).WithCode("workflow_foreach_alias_conflict")
 	}
 	if step.Foreach.MaxParallel < 0 {
-		return fmt.Errorf("step %s: foreach.max_parallel must be >= 0", step.ID)
+		return apperr.InvalidArgumentf("step %s: foreach.max_parallel must be >= 0", step.ID).WithCode("workflow_foreach_max_parallel_invalid")
 	}
 	if step.Streaming != nil && step.Streaming.Enabled {
-		return fmt.Errorf("step %s: foreach does not support streaming.enabled yet", step.ID)
+		return apperr.InvalidArgumentf("step %s: foreach does not support streaming.enabled yet", step.ID).WithCode("workflow_foreach_streaming_unsupported")
 	}
 	return nil
 }

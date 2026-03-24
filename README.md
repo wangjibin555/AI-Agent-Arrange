@@ -154,6 +154,8 @@ workflow execution 可能额外带：
 - [快速开始指南](./QUICKSTART.md)
 - [统一 execution 接入说明](./docs/api/UNIFIED_EXECUTION_INTEGRATION_GUIDE.md)
 - [统一 execution API 使用指南](./docs/api/UNIFIED_EXECUTION_API_GUIDE.md)
+- [分布式改造方案](./docs/架构/DISTRIBUTED_TRANSFORMATION_PLAN.md)
+- [中间件接入层与网络层基础说明](./docs/架构/MIDDLEWARE_ACCESS_NETWORK_FOUNDATION.md)
 - [文档目录](./docs/README.md)
 
 ## 项目结构

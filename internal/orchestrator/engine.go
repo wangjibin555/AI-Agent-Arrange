@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/agent"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/monitor"
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/apperr"
 	"github.com/wangjibin555/AI-Agent-Arrange/pkg/logger"
 	"go.uber.org/zap"
 )
@@ -22,6 +24,7 @@ type Engine struct {
 	workerCancel  context.CancelFunc
 	mu            sync.RWMutex
 	running       bool
+	metrics       *monitor.TaskMetrics
 }
 
 // NewEngine creates a new orchestration engine without persistence
@@ -49,6 +52,20 @@ func NewEngineWithRepository(registry *agent.Registry, maxWorkers int, repositor
 		taskManager:   taskManager,
 		healthChecker: healthChecker,
 		workers:       make([]*Worker, maxWorkers),
+	}
+}
+
+func (e *Engine) SetMetrics(metrics *monitor.TaskMetrics) {
+	e.metrics = metrics
+	if e.taskManager != nil {
+		e.taskManager.SetMetrics(metrics)
+	}
+	if metrics != nil {
+		for _, worker := range e.workers {
+			if worker != nil {
+				metrics.ObserveWorkerActive(worker.id, true)
+			}
+		}
 	}
 }
 
@@ -131,24 +148,24 @@ func (e *Engine) Stop() error {
 }
 
 // SubmitTask submits a new task for execution
-func (e *Engine) SubmitTask(task *Task) error {
+func (e *Engine) SubmitTask(ctx context.Context, task *Task) error {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
 	if !e.running {
-		return fmt.Errorf("engine not running")
+		return apperr.Conflict("engine not running").WithCode("orchestrator_not_running")
 	}
 
 	// Validate task (如果指定了 AgentName，检查是否存在)
 	if task.AgentName != "" {
 		if _, err := e.agentRegistry.Get(task.AgentName); err != nil {
-			return fmt.Errorf("agent not found: %w", err)
+			return apperr.NotFound("agent not found").WithCode("task_agent_not_found").WithCause(err)
 		}
 	}
 
 	// Save task to task manager (会自动通知 Worker)
-	if err := e.taskManager.CreateTask(task); err != nil {
-		return fmt.Errorf("failed to create task: %w", err)
+	if err := e.taskManager.CreateTask(ctx, task); err != nil {
+		return apperr.Wrap(err, apperr.KindInternal, "task_create_failed", "failed to create task")
 	}
 
 	return nil
@@ -173,7 +190,7 @@ func (e *Engine) SelectLeastLoadedAgent(capability string) (agent.Agent, error) 
 	// 获取所有具有该能力的 Agent
 	agents := e.agentRegistry.FindByCapability(capability)
 	if len(agents) == 0 {
-		return nil, fmt.Errorf("no agent with capability %s found", capability)
+		return nil, apperr.NotFoundf("no agent with capability %s found", capability).WithCode("agent_capability_not_found")
 	}
 
 	// 选择负载最低的
@@ -227,8 +244,8 @@ func (e *Engine) GetTaskStats() TaskStats {
 }
 
 // GetTask retrieves a task by ID
-func (e *Engine) GetTask(taskID string) (*Task, error) {
-	return e.taskManager.GetTask(taskID)
+func (e *Engine) GetTask(ctx context.Context, taskID string) (*Task, error) {
+	return e.taskManager.GetTask(ctx, taskID)
 }
 
 // SetEventPublisher sets the event publisher for task events

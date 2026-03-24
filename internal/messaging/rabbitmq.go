@@ -6,6 +6,9 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/logger"
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/midware"
+	"go.uber.org/zap"
 )
 
 // RabbitMQConfig holds RabbitMQ configuration
@@ -63,6 +66,13 @@ func NewRabbitMQClient(config *RabbitMQConfig) (*RabbitMQClient, error) {
 		return nil, fmt.Errorf("failed to declare exchange: %w", err)
 	}
 
+	logger.Info("Connected to RabbitMQ",
+		zap.String("host", config.Host),
+		zap.Int("port", config.Port),
+		zap.String("exchange", config.Exchange),
+		zap.String("exchange_type", config.ExchangeType),
+	)
+
 	return &RabbitMQClient{
 		conn:    conn,
 		channel: channel,
@@ -72,6 +82,8 @@ func NewRabbitMQClient(config *RabbitMQConfig) (*RabbitMQClient, error) {
 
 // Publish publishes a message to a queue
 func (c *RabbitMQClient) Publish(ctx context.Context, queueName string, body []byte) error {
+	start := time.Now()
+
 	// Declare queue
 	_, err := c.channel.QueueDeclare(
 		queueName, // name
@@ -82,6 +94,7 @@ func (c *RabbitMQClient) Publish(ctx context.Context, queueName string, body []b
 		nil,       // arguments
 	)
 	if err != nil {
+		c.logOperation(ctx, "publish_declare_queue", queueName, start, err)
 		return fmt.Errorf("failed to declare queue: %w", err)
 	}
 
@@ -94,7 +107,19 @@ func (c *RabbitMQClient) Publish(ctx context.Context, queueName string, body []b
 		nil,
 	)
 	if err != nil {
+		c.logOperation(ctx, "publish_bind_queue", queueName, start, err)
 		return fmt.Errorf("failed to bind queue: %w", err)
+	}
+
+	headers := amqp.Table{}
+	if meta, ok := midware.RequestMetadataFromContext(ctx); ok {
+		setHeaderIfPresent(headers, midware.HeaderRequestID, meta.RequestID)
+		setHeaderIfPresent(headers, midware.HeaderTraceID, meta.TraceID)
+		setHeaderIfPresent(headers, midware.HeaderUserID, meta.UserID)
+		setHeaderIfPresent(headers, midware.HeaderTenantID, meta.TenantID)
+		if auth := meta.ForwardHeaders[midware.HeaderAuth]; auth != "" {
+			headers[midware.HeaderAuth] = auth
+		}
 	}
 
 	// Publish message
@@ -109,17 +134,21 @@ func (c *RabbitMQClient) Publish(ctx context.Context, queueName string, body []b
 			Body:         body,
 			DeliveryMode: amqp.Persistent,
 			Timestamp:    time.Now(),
+			Headers:      headers,
 		},
 	)
 	if err != nil {
+		c.logOperation(ctx, "publish", queueName, start, err)
 		return fmt.Errorf("failed to publish message: %w", err)
 	}
 
+	c.logOperation(ctx, "publish", queueName, start, nil)
 	return nil
 }
 
 // Consume consumes messages from a queue
 func (c *RabbitMQClient) Consume(queueName string) (<-chan amqp.Delivery, error) {
+	start := time.Now()
 	// Declare queue
 	_, err := c.channel.QueueDeclare(
 		queueName, // name
@@ -130,6 +159,7 @@ func (c *RabbitMQClient) Consume(queueName string) (<-chan amqp.Delivery, error)
 		nil,       // arguments
 	)
 	if err != nil {
+		c.logOperation(context.Background(), "consume_declare_queue", queueName, start, err)
 		return nil, fmt.Errorf("failed to declare queue: %w", err)
 	}
 
@@ -142,6 +172,7 @@ func (c *RabbitMQClient) Consume(queueName string) (<-chan amqp.Delivery, error)
 		nil,
 	)
 	if err != nil {
+		c.logOperation(context.Background(), "consume_bind_queue", queueName, start, err)
 		return nil, fmt.Errorf("failed to bind queue: %w", err)
 	}
 
@@ -156,14 +187,17 @@ func (c *RabbitMQClient) Consume(queueName string) (<-chan amqp.Delivery, error)
 		nil,       // args
 	)
 	if err != nil {
+		c.logOperation(context.Background(), "consume", queueName, start, err)
 		return nil, fmt.Errorf("failed to consume messages: %w", err)
 	}
 
+	c.logOperation(context.Background(), "consume", queueName, start, nil)
 	return msgs, nil
 }
 
 // Close closes the RabbitMQ connection
 func (c *RabbitMQClient) Close() error {
+	logger.Info("Closing RabbitMQ client")
 	if c.channel != nil {
 		if err := c.channel.Close(); err != nil {
 			return err
@@ -180,4 +214,43 @@ func (c *RabbitMQClient) Close() error {
 // IsConnected checks if the client is connected
 func (c *RabbitMQClient) IsConnected() bool {
 	return c.conn != nil && !c.conn.IsClosed()
+}
+
+func (c *RabbitMQClient) logOperation(ctx context.Context, operation string, queueName string, start time.Time, err error) {
+	fields := []zap.Field{
+		zap.String("component", "rabbitmq"),
+		zap.String("operation", operation),
+		zap.String("queue", queueName),
+		zap.String("exchange", c.config.Exchange),
+		zap.Duration("latency", time.Since(start)),
+	}
+
+	if meta, ok := midware.RequestMetadataFromContext(ctx); ok {
+		if meta.RequestID != "" {
+			fields = append(fields, zap.String("request_id", meta.RequestID))
+		}
+		if meta.TraceID != "" {
+			fields = append(fields, zap.String("trace_id", meta.TraceID))
+		}
+		if meta.UserID != "" {
+			fields = append(fields, zap.String("user_id", meta.UserID))
+		}
+		if meta.TenantID != "" {
+			fields = append(fields, zap.String("tenant_id", meta.TenantID))
+		}
+	}
+
+	if err != nil {
+		fields = append(fields, zap.Error(err))
+		logger.Warn("RabbitMQ operation failed", fields...)
+		return
+	}
+
+	logger.Debug("RabbitMQ operation completed", fields...)
+}
+
+func setHeaderIfPresent(headers amqp.Table, key, value string) {
+	if value != "" {
+		headers[key] = value
+	}
 }

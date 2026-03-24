@@ -1,16 +1,18 @@
 package workflow
 
+import "context"
+
 // Repository defines the interface for workflow persistence
 type Repository interface {
 	// Workflow management
-	SaveWorkflow(workflow *Workflow) error
-	GetWorkflow(id string) (*Workflow, error)
-	ListWorkflows() ([]*Workflow, error)
-	DeleteWorkflow(id string) error
+	SaveWorkflow(ctx context.Context, workflow *Workflow) error
+	GetWorkflow(ctx context.Context, id string) (*Workflow, error)
+	ListWorkflows(ctx context.Context) ([]*Workflow, error)
+	DeleteWorkflow(ctx context.Context, id string) error
 
 	// Execution management
-	SaveExecution(execution *WorkflowExecution) error
-	GetExecution(id string) (*WorkflowExecution, error)
-	ListExecutions(workflowID string) ([]*WorkflowExecution, error)
-	GetRunningExecutions() ([]*WorkflowExecution, error)
+	SaveExecution(ctx context.Context, execution *WorkflowExecution) error
+	GetExecution(ctx context.Context, id string) (*WorkflowExecution, error)
+	ListExecutions(ctx context.Context, workflowID string) ([]*WorkflowExecution, error)
+	GetRunningExecutions(ctx context.Context) ([]*WorkflowExecution, error)
 }

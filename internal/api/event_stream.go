@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/monitor"
 	"github.com/wangjibin555/AI-Agent-Arrange/pkg/logger"
 	"go.uber.org/zap"
 )
@@ -37,6 +38,7 @@ type EventChannel struct {
 type EventStreamManager struct {
 	clients map[string][]*EventChannel // executionID -> list of client channels
 	mu      sync.RWMutex
+	metrics *monitor.SSEMetrics
 }
 
 // NewEventStreamManager creates a new event stream manager
@@ -51,8 +53,12 @@ func NewEventStreamManager() *EventStreamManager {
 	return manager
 }
 
+func (m *EventStreamManager) SetMetrics(metrics *monitor.SSEMetrics) {
+	m.metrics = metrics
+}
+
 // Subscribe subscribes a client to execution events.
-func (m *EventStreamManager) Subscribe(executionID string, clientID string) *EventChannel {
+func (m *EventStreamManager) Subscribe(executionID string, clientID string, executionType string) *EventChannel {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -64,6 +70,9 @@ func (m *EventStreamManager) Subscribe(executionID string, clientID string) *Eve
 	}
 
 	m.clients[executionID] = append(m.clients[executionID], channel)
+	if m.metrics != nil {
+		m.metrics.ObserveConnection(executionType)
+	}
 
 	logger.Info("Client subscribed to execution events",
 		zap.String("execution_id", executionID),
@@ -75,7 +84,7 @@ func (m *EventStreamManager) Subscribe(executionID string, clientID string) *Eve
 }
 
 // Unsubscribe unsubscribes a client from execution events.
-func (m *EventStreamManager) Unsubscribe(executionID string, clientID string) {
+func (m *EventStreamManager) Unsubscribe(executionID string, clientID string, executionType string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -84,6 +93,9 @@ func (m *EventStreamManager) Unsubscribe(executionID string, clientID string) {
 		if client.ClientID == clientID {
 			close(client.Channel)
 			m.clients[executionID] = append(clients[:i], clients[i+1:]...)
+			if m.metrics != nil {
+				m.metrics.ObserveDisconnect(executionType)
+			}
 
 			logger.Info("Client unsubscribed from execution events",
 				zap.String("execution_id", executionID),
@@ -102,6 +114,7 @@ func (m *EventStreamManager) Unsubscribe(executionID string, clientID string) {
 
 // Publish publishes an event to all subscribers of an execution.
 func (m *EventStreamManager) Publish(event ExecutionEvent) {
+	start := time.Now()
 	m.mu.RLock()
 	clients := m.clients[event.ExecutionID]
 	m.mu.RUnlock()
@@ -120,8 +133,14 @@ func (m *EventStreamManager) Publish(event ExecutionEvent) {
 		select {
 		case client.Channel <- event:
 			client.LastActive = time.Now()
+			if m.metrics != nil {
+				m.metrics.ObserveEventDelivered(event.ExecutionType, event.Type, time.Since(start))
+			}
 		default:
 			// Channel is full, skip this client
+			if m.metrics != nil {
+				m.metrics.ObserveEventDropped(event.ExecutionType, event.Type)
+			}
 			logger.Warn("Client channel full, skipping event",
 				zap.String("client_id", client.ClientID),
 				zap.String("execution_id", event.ExecutionID),
@@ -178,6 +197,9 @@ func (m *EventStreamManager) SendHeartbeat(executionID string) {
 		Type:        "heartbeat",
 		ExecutionID: executionID,
 		Timestamp:   time.Now(),
+	}
+	if m.metrics != nil {
+		m.metrics.ObserveHeartbeat("")
 	}
 	m.Publish(event)
 }

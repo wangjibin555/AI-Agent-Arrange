@@ -7,6 +7,7 @@ require (
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
+	github.com/wangjibin555/midware/Logger v0.0.0
 	github.com/rabbitmq/amqp091-go v1.9.0
 	github.com/sashabaranov/go-openai v1.41.2
 	github.com/stretchr/testify v1.11.1
@@ -49,3 +50,5 @@ require (
 	golang.org/x/text v0.35.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 )
+
+replace github.com/wangjibin555/midware/Logger => /Users/wepie/Desktop/基础中间层/midware/Logger

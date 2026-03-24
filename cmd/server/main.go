@@ -12,6 +12,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/agent"
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/api"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/monitor"
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/orchestrator"
 	mysqlStorage "github.com/wangjibin555/AI-Agent-Arrange/internal/storage/mysql"
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/tool"
@@ -119,7 +120,7 @@ func main() {
 	logger.Info("Agent registry initialized")
 
 	// Register agents with global tool registry
-	if err := registerAgents(registry, globalToolRegistry); err != nil {
+	if err := registerAgents(registry, globalToolRegistry, nil); err != nil {
 		logger.Fatal("Failed to register agents", zap.Error(err))
 	}
 
@@ -148,6 +149,10 @@ func main() {
 
 	// Initialize HTTP server
 	httpServer := api.NewServerWithWorkflow(engine, workflowEngine, cfg.Server.Host, cfg.Server.Port, cfg.Server.Mode)
+	applyMetricsToRegisteredAgents(registry, httpServer.Metrics())
+	if db != nil {
+		db.SetDependencyMetrics(httpServer.Metrics().Dependency)
+	}
 
 	// Setup unified event publisher for real-time task and workflow updates
 	eventPublisher := httpServer.GetEventPublisher()
@@ -175,6 +180,7 @@ func main() {
 	fmt.Printf("\n✅ Server is running on http://%s:%d\n", cfg.Server.Host, cfg.Server.Port)
 	fmt.Println("📡 API endpoints:")
 	fmt.Println("   - Health check: GET /health")
+	fmt.Println("   - Metrics: GET /metrics")
 	fmt.Println("   - Create task:  POST /api/v1/tasks")
 	fmt.Println("   - Execute workflow: POST /api/v1/workflows/execute")
 	fmt.Println("   - Execution detail: GET /api/v1/executions/:id")
@@ -241,20 +247,20 @@ func initLogger(cfg *config.Config) error {
 }
 
 // registerAgents registers all agents (Echo, OpenAI, DeepSeek)
-func registerAgents(registry *agent.Registry, toolRegistry *tool.Registry) error {
+func registerAgents(registry *agent.Registry, toolRegistry *tool.Registry, metrics *monitor.Metrics) error {
 	// 1. Register EchoAgents for testing
-	if err := registerEchoAgents(registry); err != nil {
+	if err := registerEchoAgents(registry, metrics); err != nil {
 		return err
 	}
 
 	// 2. Register OpenAI Agent (for complex tasks) with global tool registry
-	if err := registerOpenAIAgents(registry, toolRegistry); err != nil {
+	if err := registerOpenAIAgents(registry, toolRegistry, metrics); err != nil {
 		logger.Warn("Failed to register OpenAI agents", zap.Error(err))
 		// 不中断启动，允许没有 OpenAI API Key 的情况
 	}
 
 	// 3. Register DeepSeek Agent (for general-purpose tasks) with global tool registry
-	if err := registerDeepSeekAgents(registry, toolRegistry); err != nil {
+	if err := registerDeepSeekAgents(registry, toolRegistry, metrics); err != nil {
 		logger.Warn("Failed to register DeepSeek agents", zap.Error(err))
 		// 不中断启动，允许没有 DeepSeek API Key 的情况
 	}
@@ -262,8 +268,27 @@ func registerAgents(registry *agent.Registry, toolRegistry *tool.Registry) error
 	return nil
 }
 
+func applyMetricsToRegisteredAgents(registry *agent.Registry, metrics *monitor.Metrics) {
+	if registry == nil || metrics == nil {
+		return
+	}
+
+	for _, registeredAgent := range registry.GetAll() {
+		switch ag := registeredAgent.(type) {
+		case *agent.EchoAgent:
+			ag.SetAgentMetrics(metrics.Agent)
+		case *agent.OpenAIAgent:
+			ag.SetAgentMetrics(metrics.Agent)
+			ag.SetToolMetrics(metrics.Tool)
+		case *agent.DeepSeekAgent:
+			ag.SetAgentMetrics(metrics.Agent)
+			ag.SetToolMetrics(metrics.Tool)
+		}
+	}
+}
+
 // registerEchoAgents registers test EchoAgent instances
-func registerEchoAgents(registry *agent.Registry) error {
+func registerEchoAgents(registry *agent.Registry, metrics *monitor.Metrics) error {
 	// Create multiple EchoAgent instances for testing load balancing
 	agents := []struct {
 		name  string
@@ -277,6 +302,9 @@ func registerEchoAgents(registry *agent.Registry) error {
 	for _, agentInfo := range agents {
 		// Create agent
 		echoAgent := agent.NewEchoAgent(agentInfo.name)
+		if metrics != nil {
+			echoAgent.SetAgentMetrics(metrics.Agent)
+		}
 
 		// Configure agent
 		config := &agent.Config{
@@ -316,7 +344,7 @@ func registerEchoAgents(registry *agent.Registry) error {
 }
 
 // registerOpenAIAgents registers OpenAI agents for complex tasks
-func registerOpenAIAgents(registry *agent.Registry, toolRegistry *tool.Registry) error {
+func registerOpenAIAgents(registry *agent.Registry, toolRegistry *tool.Registry, metrics *monitor.Metrics) error {
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" || apiKey == "your-openai-api-key-here" {
 		return fmt.Errorf("OPENAI_API_KEY not set in environment")
@@ -332,6 +360,10 @@ func registerOpenAIAgents(registry *agent.Registry, toolRegistry *tool.Registry)
 
 	// 将工具注册表设置到Agent
 	openaiAgent.SetToolRegistry(toolRegistry)
+	if metrics != nil {
+		openaiAgent.SetToolMetrics(metrics.Tool)
+		openaiAgent.SetAgentMetrics(metrics.Agent)
+	}
 
 	// Configure agent
 	config := &agent.Config{
@@ -373,7 +405,7 @@ func registerOpenAIAgents(registry *agent.Registry, toolRegistry *tool.Registry)
 }
 
 // registerDeepSeekAgents registers DeepSeek agents for general-purpose LLM tasks
-func registerDeepSeekAgents(registry *agent.Registry, toolRegistry *tool.Registry) error {
+func registerDeepSeekAgents(registry *agent.Registry, toolRegistry *tool.Registry, metrics *monitor.Metrics) error {
 	apiKey := os.Getenv("DEEPSEEK_API_KEY")
 	if apiKey == "" || apiKey == "your-deepseek-api-key-here" {
 		return fmt.Errorf("DEEPSEEK_API_KEY not set in environment")
@@ -389,6 +421,10 @@ func registerDeepSeekAgents(registry *agent.Registry, toolRegistry *tool.Registr
 
 	// 将工具注册表设置到Agent
 	deepseekAgent.SetToolRegistry(toolRegistry)
+	if metrics != nil {
+		deepseekAgent.SetToolMetrics(metrics.Tool)
+		deepseekAgent.SetAgentMetrics(metrics.Agent)
+	}
 
 	// Configure agent
 	config := &agent.Config{

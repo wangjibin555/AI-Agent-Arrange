@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/monitor"
 )
 
 // EchoAgent is a simple agent for testing and demonstration purposes
@@ -14,6 +16,7 @@ type EchoAgent struct {
 	capabilities []string
 	config       *Config
 	delay        time.Duration // 模拟处理延迟
+	agentMetrics *monitor.AgentMetrics
 }
 
 // NewEchoAgent creates a new EchoAgent instance
@@ -58,6 +61,10 @@ func (e *EchoAgent) Init(config *Config) error {
 	return nil
 }
 
+func (e *EchoAgent) SetAgentMetrics(metrics *monitor.AgentMetrics) {
+	e.agentMetrics = metrics
+}
+
 // Shutdown gracefully shuts down the agent
 func (e *EchoAgent) Shutdown() error {
 	// EchoAgent 没有需要清理的资源
@@ -66,6 +73,7 @@ func (e *EchoAgent) Shutdown() error {
 
 // Execute executes a task based on the action type
 func (e *EchoAgent) Execute(ctx context.Context, input *TaskInput) (*TaskOutput, error) {
+	start := time.Now()
 	output := &TaskOutput{
 		TaskID:  input.TaskID,
 		Success: false,
@@ -74,6 +82,20 @@ func (e *EchoAgent) Execute(ctx context.Context, input *TaskInput) (*TaskOutput,
 			"agent":      e.name,
 			"started_at": time.Now().Format(time.RFC3339),
 		},
+	}
+	if e.agentMetrics != nil {
+		e.agentMetrics.ObserveAgentStarted(e.name)
+		defer func() {
+			status := "failed"
+			if ctx.Err() == context.Canceled {
+				status = "canceled"
+			} else if ctx.Err() == context.DeadlineExceeded {
+				status = "timeout"
+			} else if output.Success {
+				status = "success"
+			}
+			e.agentMetrics.ObserveAgentFinished(e.name, status, time.Since(start))
+		}()
 	}
 
 	// 检查 context 是否已取消

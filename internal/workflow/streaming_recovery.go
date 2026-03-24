@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/agent"
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/apperr"
 )
 
 type StreamError struct {
@@ -41,7 +42,7 @@ func (e *StreamingEngine) startStreamErrorMonitor(
 					return
 				}
 				if step.Streaming.BufferSize > 0 && buffer.Size() > step.Streaming.BufferSize {
-					report(fmt.Errorf("buffer overflow detected for step %s", step.ID))
+					report(apperr.Conflict(fmt.Sprintf("buffer overflow detected for step %s", step.ID)).WithCode("workflow_stream_buffer_overflow"))
 					return
 				}
 
@@ -55,7 +56,7 @@ func (e *StreamingEngine) startStreamErrorMonitor(
 				if e.isStepStillRunning(execution, stepExec.StepID) &&
 					time.Since(stepExec.StartedAt) > time.Duration(timeout)*time.Second &&
 					buffer.TimeSinceLastChunk() > time.Duration(timeout)*time.Second {
-					report(fmt.Errorf("stream stalled for step %s", step.ID))
+					report(apperr.Conflict(fmt.Sprintf("stream stalled for step %s", step.ID)).WithCode("workflow_stream_stalled"))
 					return
 				}
 			}
@@ -107,7 +108,7 @@ func (e *StreamingEngine) saveStreamingCheckpoint(
 		Output:      copyMap(output),
 		Timestamp:   time.Now(),
 	}
-	_ = e.persistExecutionSnapshot(execution)
+	_ = e.persistExecutionSnapshot(context.Background(), execution)
 }
 
 func (e *StreamingEngine) restoreFromCheckpoint(
@@ -161,7 +162,7 @@ func (e *StreamingEngine) executeCompensation(
 
 	ag, err := e.agentRegistry.Get(step.AgentName)
 	if err != nil {
-		return fmt.Errorf("compensation agent not found: %s", step.AgentName)
+		return apperr.NotFoundf("compensation agent not found: %s", step.AgentName).WithCode("workflow_compensation_agent_not_found")
 	}
 
 	params := copyMap(step.CompensationParams)
@@ -184,7 +185,7 @@ func (e *StreamingEngine) executeCompensation(
 		return err
 	}
 	if !output.Success {
-		return fmt.Errorf("compensation failed: %s", output.Error)
+		return apperr.Internalf("compensation failed: %s", output.Error).WithCode("workflow_compensation_failed")
 	}
 
 	e.publishEvent(execution.ID, "step_compensated", string(WorkflowStatusFailed),
@@ -235,7 +236,7 @@ func (e *StreamingEngine) ResumeExecution(
 	sourceExecutionID string,
 	variables map[string]interface{},
 ) (*WorkflowExecution, error) {
-	source, err := e.GetExecution(sourceExecutionID)
+	source, err := e.GetExecution(ctx, sourceExecutionID)
 	if err != nil {
 		return nil, err
 	}
@@ -299,7 +300,7 @@ func (e *StreamingEngine) ResumeExecution(
 	e.executionCache[execution.ID] = execution
 	e.mu.Unlock()
 
-	if err := e.persistExecutionSnapshot(execution); err != nil {
+	if err := e.persistExecutionSnapshot(ctx, execution); err != nil {
 		return nil, fmt.Errorf("failed to save resumed execution: %w", err)
 	}
 
@@ -322,7 +323,7 @@ func (e *StreamingEngine) RecoverRunningExecutions(ctx context.Context) (int, in
 		return 0, 0, nil
 	}
 
-	runningExecutions, err := e.repository.GetRunningExecutions()
+	runningExecutions, err := e.repository.GetRunningExecutions(ctx)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to load running executions: %w", err)
 	}
@@ -335,9 +336,9 @@ func (e *StreamingEngine) RecoverRunningExecutions(ctx context.Context) (int, in
 			continue
 		}
 
-		workflowDef, err := e.repository.GetWorkflow(execution.WorkflowID)
+		workflowDef, err := e.repository.GetWorkflow(ctx, execution.WorkflowID)
 		if err != nil {
-			if markErr := e.markExecutionInterrupted(execution, "workflow interrupted by server restart: definition unavailable"); markErr != nil {
+			if markErr := e.markExecutionInterrupted(ctx, execution, "workflow interrupted by server restart: definition unavailable"); markErr != nil {
 				return resumedCount, interruptedCount, fmt.Errorf("failed to mark interrupted execution %s: %w", execution.ID, markErr)
 			}
 			interruptedCount++
@@ -346,15 +347,18 @@ func (e *StreamingEngine) RecoverRunningExecutions(ctx context.Context) (int, in
 
 		if e.hasStreamingSteps(workflowDef) && len(execution.Checkpoints) > 0 {
 			if resumedExecution, err := e.ResumeExecution(ctx, workflowDef, execution.ID, nil); err == nil {
-				if markErr := e.markExecutionSuperseded(execution, resumedExecution.ID, "workflow superseded by resumed execution after server restart"); markErr != nil {
+				if markErr := e.markExecutionSuperseded(ctx, execution, resumedExecution.ID, "workflow superseded by resumed execution after server restart"); markErr != nil {
 					return resumedCount, interruptedCount, fmt.Errorf("failed to mark resumed source execution %s: %w", execution.ID, markErr)
+				}
+				if e.metrics != nil {
+					e.metrics.ObserveRecovery(execution.WorkflowID, string(RecoveryStatusResumed))
 				}
 				resumedCount++
 				continue
 			}
 		}
 
-		if err := e.markExecutionInterrupted(execution, "workflow interrupted by server restart"); err != nil {
+		if err := e.markExecutionInterrupted(ctx, execution, "workflow interrupted by server restart"); err != nil {
 			return resumedCount, interruptedCount, fmt.Errorf("failed to mark interrupted execution %s: %w", execution.ID, err)
 		}
 		interruptedCount++
@@ -363,7 +367,7 @@ func (e *StreamingEngine) RecoverRunningExecutions(ctx context.Context) (int, in
 	return resumedCount, interruptedCount, nil
 }
 
-func (e *StreamingEngine) markExecutionInterrupted(execution *WorkflowExecution, message string) error {
+func (e *StreamingEngine) markExecutionInterrupted(ctx context.Context, execution *WorkflowExecution, message string) error {
 	e.mu.Lock()
 	e.executionCache[execution.ID] = execution
 	e.mu.Unlock()
@@ -374,17 +378,20 @@ func (e *StreamingEngine) markExecutionInterrupted(execution *WorkflowExecution,
 	now := time.Now()
 	execution.CompletedAt = &now
 
-	if err := e.persistExecutionSnapshot(execution); err != nil {
+	if err := e.persistExecutionSnapshot(ctx, execution); err != nil {
 		return err
 	}
 
 	e.publishEvent(execution.ID, "workflow_interrupted", string(execution.Status), message, map[string]interface{}{
 		"recovery_status": string(execution.RecoveryStatus),
 	})
+	if e.metrics != nil {
+		e.metrics.ObserveRecovery(execution.WorkflowID, string(execution.RecoveryStatus))
+	}
 	return nil
 }
 
-func (e *StreamingEngine) markExecutionSuperseded(execution *WorkflowExecution, resumedExecutionID, message string) error {
+func (e *StreamingEngine) markExecutionSuperseded(ctx context.Context, execution *WorkflowExecution, resumedExecutionID, message string) error {
 	e.mu.Lock()
 	e.executionCache[execution.ID] = execution
 	e.mu.Unlock()
@@ -396,7 +403,7 @@ func (e *StreamingEngine) markExecutionSuperseded(execution *WorkflowExecution, 
 	now := time.Now()
 	execution.CompletedAt = &now
 
-	if err := e.persistExecutionSnapshot(execution); err != nil {
+	if err := e.persistExecutionSnapshot(ctx, execution); err != nil {
 		return err
 	}
 
@@ -404,6 +411,9 @@ func (e *StreamingEngine) markExecutionSuperseded(execution *WorkflowExecution, 
 		"recovery_status":            string(execution.RecoveryStatus),
 		"superseded_by_execution_id": execution.SupersededByExecutionID,
 	})
+	if e.metrics != nil {
+		e.metrics.ObserveRecovery(execution.WorkflowID, string(execution.RecoveryStatus))
+	}
 	return nil
 }
 

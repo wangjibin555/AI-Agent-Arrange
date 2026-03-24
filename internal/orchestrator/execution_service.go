@@ -2,12 +2,15 @@ package orchestrator
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/monitor"
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/workflow"
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/apperr"
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/midware"
 )
 
 // ExecutionType identifies the underlying execution mode.
@@ -81,8 +84,8 @@ type WorkflowExecutionRequest struct {
 // WorkflowRunner is the minimal workflow execution interface needed by the unified service.
 type WorkflowRunner interface {
 	Execute(ctx context.Context, workflow *workflow.Workflow, variables map[string]interface{}) (*workflow.WorkflowExecution, error)
-	GetExecution(executionID string) (*workflow.WorkflowExecution, error)
-	CancelExecution(executionID string) error
+	GetExecution(ctx context.Context, executionID string) (*workflow.WorkflowExecution, error)
+	CancelExecution(ctx context.Context, executionID string) error
 }
 
 // ExecutionService unifies task and workflow execution behind one service boundary.
@@ -92,6 +95,7 @@ type ExecutionService struct {
 
 	mu             sync.RWMutex
 	executionTypes map[string]ExecutionType
+	metrics        *monitor.TaskMetrics
 }
 
 // NewExecutionService creates a new unified execution service.
@@ -103,19 +107,43 @@ func NewExecutionService(orchestratorEngine *Engine, workflowEngine WorkflowRunn
 	}
 }
 
+func (s *ExecutionService) SetMetrics(metrics *monitor.TaskMetrics) {
+	s.metrics = metrics
+}
+
 // ExecuteTask submits a task through the orchestrator engine and returns a unified handle.
 func (s *ExecutionService) ExecuteTask(ctx context.Context, req *TaskExecutionRequest) (*ExecutionHandle, error) {
+	start := time.Now()
+	const execType = ExecutionTypeTask
+	if s.metrics != nil {
+		s.metrics.IncExecutionInflight(string(execType))
+		defer s.metrics.DecExecutionInflight(string(execType))
+	}
+
 	if req == nil {
-		return nil, fmt.Errorf("task execution request is nil")
+		err := apperr.InvalidArgument("task execution request is nil").WithCode("task_request_invalid")
+		s.observeExecutionRequest(execType, "failed", start)
+		return nil, err
 	}
 	if s.orchestrator == nil {
-		return nil, fmt.Errorf("orchestrator engine is not configured")
+		err := apperr.Internal("orchestrator engine is not configured")
+		s.observeExecutionRequest(execType, "failed", start)
+		return nil, err
 	}
 	if req.Action == "" {
-		return nil, fmt.Errorf("task action is required")
+		err := apperr.InvalidArgument("task action is required").WithCode("task_action_required")
+		s.observeExecutionRequest(execType, "failed", start)
+		return nil, err
+	}
+	if req.AgentName != "" && req.Capability != "" {
+		err := apperr.InvalidArgument("cannot specify both 'agent_name' and 'capability', choose one").WithCode("task_agent_capability_conflict")
+		s.observeExecutionRequest(execType, "failed", start)
+		return nil, err
 	}
 	if req.AgentName == "" && req.Capability == "" {
-		return nil, fmt.Errorf("either agent name or capability is required")
+		err := apperr.InvalidArgument("either agent name or capability is required").WithCode("task_agent_or_capability_required")
+		s.observeExecutionRequest(execType, "failed", start)
+		return nil, err
 	}
 
 	taskID := req.ID
@@ -134,33 +162,57 @@ func (s *ExecutionService) ExecuteTask(ctx context.Context, req *TaskExecutionRe
 		Status:             TaskStatusPending,
 		CreatedAt:          time.Now(),
 	}
+	if meta, ok := midware.RequestMetadataFromContext(ctx); ok {
+		task.RequestMetadata = midware.RequestMetadataToMap(meta)
+	}
 
-	if err := s.orchestrator.SubmitTask(task); err != nil {
+	if err := s.orchestrator.SubmitTask(ctx, task); err != nil {
+		s.observeExecutionRequest(execType, "failed", start)
 		return nil, err
 	}
 
 	s.rememberExecutionType(taskID, ExecutionTypeTask)
+	s.observeExecutionRequest(execType, "success", start)
 	return &ExecutionHandle{ID: taskID, Type: ExecutionTypeTask}, nil
 }
 
 // ExecuteWorkflow runs a workflow through the configured workflow engine.
 func (s *ExecutionService) ExecuteWorkflow(ctx context.Context, req *WorkflowExecutionRequest) (*ExecutionHandle, error) {
+	start := time.Now()
+	const execType = ExecutionTypeWorkflow
+	if s.metrics != nil {
+		s.metrics.IncExecutionInflight(string(execType))
+		defer s.metrics.DecExecutionInflight(string(execType))
+	}
+
 	if req == nil {
-		return nil, fmt.Errorf("workflow execution request is nil")
+		err := apperr.InvalidArgument("workflow execution request is nil").WithCode("workflow_request_invalid")
+		s.observeExecutionRequest(execType, "failed", start)
+		return nil, err
 	}
 	if s.workflowEngine == nil {
-		return nil, fmt.Errorf("workflow engine is not configured")
+		err := apperr.Internal("workflow engine is not configured")
+		s.observeExecutionRequest(execType, "failed", start)
+		return nil, err
 	}
 	if req.Workflow == nil {
-		return nil, fmt.Errorf("workflow definition is required")
+		err := apperr.InvalidArgument("workflow definition is required").WithCode("workflow_definition_required")
+		s.observeExecutionRequest(execType, "failed", start)
+		return nil, err
+	}
+	if err := workflow.ValidateDefinition(req.Workflow); err != nil {
+		s.observeExecutionRequest(execType, "failed", start)
+		return nil, err
 	}
 
 	execution, err := s.workflowEngine.Execute(ctx, req.Workflow, req.Variables)
 	if err != nil {
+		s.observeExecutionRequest(execType, "failed", start)
 		return nil, err
 	}
 
 	s.rememberExecutionType(execution.ID, ExecutionTypeWorkflow)
+	s.observeExecutionRequest(execType, "success", start)
 	return &ExecutionHandle{ID: execution.ID, Type: ExecutionTypeWorkflow}, nil
 }
 
@@ -169,70 +221,112 @@ func (s *ExecutionService) GetExecution(ctx context.Context, executionID string)
 	_ = ctx
 
 	if executionID == "" {
-		return nil, fmt.Errorf("execution id is required")
+		return nil, apperr.InvalidArgument("execution id is required").WithCode("execution_id_required")
 	}
 
 	switch s.executionType(executionID) {
 	case ExecutionTypeTask:
-		return s.getTaskExecution(executionID)
+		return s.getTaskExecution(ctx, executionID)
 	case ExecutionTypeWorkflow:
-		return s.getWorkflowExecution(executionID)
+		return s.getWorkflowExecution(ctx, executionID)
 	default:
-		if view, err := s.getTaskExecution(executionID); err == nil {
+		if view, err := s.getTaskExecution(ctx, executionID); err == nil {
 			s.rememberExecutionType(executionID, ExecutionTypeTask)
 			return view, nil
 		}
-		if view, err := s.getWorkflowExecution(executionID); err == nil {
+		if view, err := s.getWorkflowExecution(ctx, executionID); err == nil {
 			s.rememberExecutionType(executionID, ExecutionTypeWorkflow)
 			return view, nil
 		}
-		return nil, fmt.Errorf("execution %s not found", executionID)
+		return nil, apperr.NotFoundf("execution %s not found", executionID).WithCode("execution_not_found")
 	}
 }
 
 // CancelExecution cancels a unified execution if the underlying engine supports it.
 func (s *ExecutionService) CancelExecution(ctx context.Context, executionID string) error {
 	_ = ctx
+	execType := s.executionType(executionID)
+	recordCancel := func(status string) {
+		if s.metrics != nil {
+			s.metrics.ObserveExecutionCancel(string(execType), status)
+		}
+	}
 
 	switch s.executionType(executionID) {
 	case ExecutionTypeTask:
-		return s.cancelTaskExecution(executionID)
+		err := s.cancelTaskExecution(ctx, executionID)
+		recordCancel(cancelStatus(err))
+		return err
 	case ExecutionTypeWorkflow:
-		return s.cancelWorkflowExecution(executionID)
+		err := s.cancelWorkflowExecution(ctx, executionID)
+		recordCancel(cancelStatus(err))
+		return err
 	default:
-		if err := s.cancelTaskExecution(executionID); err == nil {
+		if err := s.cancelTaskExecution(ctx, executionID); err == nil {
 			s.rememberExecutionType(executionID, ExecutionTypeTask)
+			execType = ExecutionTypeTask
+			recordCancel("success")
 			return nil
 		}
-		if _, err := s.getWorkflowExecution(executionID); err == nil {
+		if _, err := s.getWorkflowExecution(ctx, executionID); err == nil {
 			s.rememberExecutionType(executionID, ExecutionTypeWorkflow)
-			return s.cancelWorkflowExecution(executionID)
+			execType = ExecutionTypeWorkflow
+			err = s.cancelWorkflowExecution(ctx, executionID)
+			recordCancel(cancelStatus(err))
+			return err
 		}
-		return fmt.Errorf("execution %s not found", executionID)
+		recordCancel("not_found")
+		return apperr.NotFoundf("execution %s not found", executionID).WithCode("execution_not_found")
 	}
 }
 
-func (s *ExecutionService) cancelTaskExecution(executionID string) error {
+func (s *ExecutionService) observeExecutionRequest(execType ExecutionType, status string, start time.Time) {
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.ObserveExecutionRequest(string(execType), status, time.Since(start))
+}
+
+func cancelStatus(err error) string {
+	if err == nil {
+		return "success"
+	}
+
+	var appErr *apperr.Error
+	if errors.As(err, &appErr) {
+		switch appErr.Kind {
+		case apperr.KindNotFound:
+			return "not_found"
+		case apperr.KindConflict:
+			return "conflict"
+		default:
+			return "failed"
+		}
+	}
+	return "failed"
+}
+
+func (s *ExecutionService) cancelTaskExecution(ctx context.Context, executionID string) error {
 	if s.orchestrator == nil {
-		return fmt.Errorf("orchestrator engine is not configured")
+		return apperr.Internal("orchestrator engine is not configured")
 	}
 
-	return s.orchestrator.GetTaskManager().CancelTask(executionID)
+	return s.orchestrator.GetTaskManager().CancelTask(ctx, executionID)
 }
 
-func (s *ExecutionService) cancelWorkflowExecution(executionID string) error {
+func (s *ExecutionService) cancelWorkflowExecution(ctx context.Context, executionID string) error {
 	if s.workflowEngine == nil {
-		return fmt.Errorf("workflow engine is not configured")
+		return apperr.Internal("workflow engine is not configured")
 	}
-	return s.workflowEngine.CancelExecution(executionID)
+	return s.workflowEngine.CancelExecution(ctx, executionID)
 }
 
-func (s *ExecutionService) getTaskExecution(executionID string) (*ExecutionView, error) {
+func (s *ExecutionService) getTaskExecution(ctx context.Context, executionID string) (*ExecutionView, error) {
 	if s.orchestrator == nil {
-		return nil, fmt.Errorf("orchestrator engine is not configured")
+		return nil, apperr.Internal("orchestrator engine is not configured")
 	}
 
-	task, err := s.orchestrator.GetTask(executionID)
+	task, err := s.orchestrator.GetTask(ctx, executionID)
 	if err != nil {
 		return nil, err
 	}
@@ -259,12 +353,12 @@ func (s *ExecutionService) getTaskExecution(executionID string) (*ExecutionView,
 	}, nil
 }
 
-func (s *ExecutionService) getWorkflowExecution(executionID string) (*ExecutionView, error) {
+func (s *ExecutionService) getWorkflowExecution(ctx context.Context, executionID string) (*ExecutionView, error) {
 	if s.workflowEngine == nil {
-		return nil, fmt.Errorf("workflow engine is not configured")
+		return nil, apperr.Internal("workflow engine is not configured")
 	}
 
-	execution, err := s.workflowEngine.GetExecution(executionID)
+	execution, err := s.workflowEngine.GetExecution(ctx, executionID)
 	if err != nil {
 		return nil, err
 	}

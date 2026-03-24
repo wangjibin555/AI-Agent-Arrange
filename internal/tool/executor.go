@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/monitor"
 )
 
 // ExecutionConfig holds configuration for tool execution
@@ -29,6 +31,7 @@ func DefaultExecutionConfig() *ExecutionConfig {
 type Executor struct {
 	registry *Registry
 	config   *ExecutionConfig
+	metrics  *monitor.ToolMetrics
 }
 
 // NewExecutor creates a new tool executor
@@ -42,16 +45,26 @@ func NewExecutor(registry *Registry, config *ExecutionConfig) *Executor {
 	}
 }
 
+func (e *Executor) SetMetrics(metrics *monitor.ToolMetrics) {
+	e.metrics = metrics
+}
+
 // Execute executes a tool with full error handling, timeout, and retry logic
 func (e *Executor) Execute(ctx context.Context, toolName string, params map[string]interface{}) (*Result, error) {
+	start := time.Now()
+	e.observeToolStarted(toolName)
+
 	// Get tool from registry
 	toolInstance, err := e.registry.Get(toolName)
 	if err != nil {
+		e.observeToolFinished(toolName, "not_found", start)
 		return nil, ErrToolNotFound(toolName)
 	}
 
 	// Validate parameters against schema
 	if err := e.validateParams(toolInstance, params); err != nil {
+		e.observeToolValidationFailed(toolName)
+		e.observeToolFinished(toolName, "validation_failed", start)
 		return nil, err
 	}
 
@@ -71,6 +84,7 @@ func (e *Executor) Execute(ctx context.Context, toolName string, params map[stri
 			// Panic recovery to prevent tool panics from crashing the agent
 			defer func() {
 				if r := recover(); r != nil {
+					e.observeToolPanic(toolName)
 					errChan <- ErrExecutionFailed(
 						toolName,
 						fmt.Sprintf("tool execution panicked: %v", r),
@@ -92,6 +106,7 @@ func (e *Executor) Execute(ctx context.Context, toolName string, params map[stri
 		case <-execCtx.Done():
 			cancel()
 			if execCtx.Err() == context.DeadlineExceeded {
+				e.observeToolTimeout(toolName)
 				lastErr = ErrTimeout(toolName, e.config.Timeout)
 			} else {
 				lastErr = fmt.Errorf("context cancelled: %w", execCtx.Err())
@@ -104,6 +119,7 @@ func (e *Executor) Execute(ctx context.Context, toolName string, params map[stri
 			if !result.Success {
 				lastErr = ErrExecutionFailed(toolName, result.Error, nil)
 			} else {
+				e.observeToolFinished(toolName, "success", start)
 				return result, nil // Success!
 			}
 		}
@@ -112,6 +128,7 @@ func (e *Executor) Execute(ctx context.Context, toolName string, params map[stri
 		if !IsRetryable(lastErr) {
 			break // Don't retry non-retryable errors
 		}
+		e.observeToolRetry(toolName, retryReason(lastErr))
 
 		// Don't sleep after last attempt
 		if attempt < e.config.MaxRetries {
@@ -125,6 +142,7 @@ func (e *Executor) Execute(ctx context.Context, toolName string, params map[stri
 		}
 	}
 
+	e.observeToolFinished(toolName, toolStatus(lastErr), start)
 	return nil, lastErr
 }
 
@@ -226,6 +244,70 @@ func (e *Executor) wrapExecutionError(toolName string, err error) error {
 
 	// Wrap generic errors
 	return ErrExecutionFailed(toolName, err.Error(), err)
+}
+
+func (e *Executor) observeToolStarted(toolName string) {
+	if e.metrics != nil {
+		e.metrics.ObserveToolStarted(toolName)
+	}
+}
+
+func (e *Executor) observeToolFinished(toolName, status string, start time.Time) {
+	if e.metrics != nil {
+		e.metrics.ObserveToolFinished(toolName, status, time.Since(start))
+	}
+}
+
+func (e *Executor) observeToolRetry(toolName, reason string) {
+	if e.metrics != nil {
+		e.metrics.ObserveToolRetry(toolName, reason)
+	}
+}
+
+func (e *Executor) observeToolTimeout(toolName string) {
+	if e.metrics != nil {
+		e.metrics.ObserveToolTimeout(toolName)
+	}
+}
+
+func (e *Executor) observeToolValidationFailed(toolName string) {
+	if e.metrics != nil {
+		e.metrics.ObserveToolValidationFailed(toolName)
+	}
+}
+
+func (e *Executor) observeToolPanic(toolName string) {
+	if e.metrics != nil {
+		e.metrics.ObserveToolPanic(toolName)
+	}
+}
+
+func toolStatus(err error) string {
+	if err == nil {
+		return "success"
+	}
+	var toolErr *ToolError
+	if errors.As(err, &toolErr) {
+		switch toolErr.Type {
+		case ErrorTypeNotFound:
+			return "not_found"
+		case ErrorTypeInvalidParams:
+			return "validation_failed"
+		case ErrorTypeTimeout:
+			return "timeout"
+		default:
+			return "failed"
+		}
+	}
+	return "failed"
+}
+
+func retryReason(err error) string {
+	var toolErr *ToolError
+	if errors.As(err, &toolErr) && toolErr.Type != "" {
+		return string(toolErr.Type)
+	}
+	return "retryable_error"
 }
 
 // getJSONType returns JSON type name for a Go value

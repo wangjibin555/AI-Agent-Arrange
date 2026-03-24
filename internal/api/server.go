@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/wangjibin555/AI-Agent-Arrange/internal/monitor"
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/orchestrator"
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/workflow"
 	"github.com/wangjibin555/AI-Agent-Arrange/pkg/logger"
+	"github.com/wangjibin555/AI-Agent-Arrange/pkg/midware"
 	"go.uber.org/zap"
 )
 
@@ -21,6 +24,8 @@ type Server struct {
 	server           *http.Server
 	addr             string
 	eventManager     *EventStreamManager
+	metrics          *monitor.Metrics
+	errors           *ginErrorAdapter
 }
 
 // NewServer creates a new API server
@@ -38,11 +43,7 @@ func NewServerWithWorkflow(engine *orchestrator.Engine, workflowEngine workflowR
 	}
 
 	router := gin.New()
-
-	// Add middleware
-	router.Use(gin.Recovery())
-	router.Use(LoggerMiddleware())
-	router.Use(CORSMiddleware())
+	metrics := monitor.New(monitor.Config{Namespace: "ai_agent_arrange"})
 
 	addr := fmt.Sprintf("%s:%d", host, port)
 
@@ -51,6 +52,8 @@ func NewServerWithWorkflow(engine *orchestrator.Engine, workflowEngine workflowR
 		executionService: orchestrator.NewExecutionService(engine, workflowEngine),
 		router:           router,
 		addr:             addr,
+		metrics:          metrics,
+		errors:           newGinErrorAdapter(),
 		eventManager:     NewEventStreamManager(),
 		server: &http.Server{
 			Addr:    addr,
@@ -66,6 +69,23 @@ func NewServerWithWorkflow(engine *orchestrator.Engine, workflowEngine workflowR
 			MaxHeaderBytes: 1 << 20, // 1MB
 		},
 	}
+	s.executionService.SetMetrics(metrics.Task)
+	if s.engine != nil {
+		s.engine.SetMetrics(metrics.Task)
+	}
+	if workflowMetricsSetter, ok := any(workflowEngine).(interface {
+		SetMetrics(*monitor.WorkflowMetrics)
+	}); ok {
+		workflowMetricsSetter.SetMetrics(metrics.Workflow)
+	}
+	s.eventManager.SetMetrics(metrics.SSE)
+
+	// Add middleware
+	router.Use(s.errors.Recovery())
+	router.Use(midware.RequestContextMiddleware())
+	router.Use(s.MetricsMiddleware())
+	router.Use(midware.AccessLogMiddleware())
+	router.Use(midware.CORSMiddleware())
 
 	// Setup routes
 	s.setupRoutes()
@@ -77,6 +97,7 @@ func NewServerWithWorkflow(engine *orchestrator.Engine, workflowEngine workflowR
 func (s *Server) setupRoutes() {
 	// Health check
 	s.router.GET("/health", s.handleHealth)
+	s.router.GET("/metrics", gin.WrapH(s.metrics.Handler()))
 	s.router.GET("/", s.handleRoot)
 
 	// API v1 routes
@@ -120,8 +141,8 @@ func (s *Server) setupRoutes() {
 
 type workflowRunner interface {
 	Execute(ctx context.Context, workflow *workflow.Workflow, variables map[string]interface{}) (*workflow.WorkflowExecution, error)
-	GetExecution(executionID string) (*workflow.WorkflowExecution, error)
-	CancelExecution(executionID string) error
+	GetExecution(ctx context.Context, executionID string) (*workflow.WorkflowExecution, error)
+	CancelExecution(ctx context.Context, executionID string) error
 }
 
 // Start starts the HTTP server
@@ -148,41 +169,27 @@ func (s *Server) GetEventPublisher() *UnifiedEventPublisher {
 	return NewUnifiedEventPublisher(s.eventManager)
 }
 
-// LoggerMiddleware creates a Gin middleware for logging
-func LoggerMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		start := time.Now()
-		path := c.Request.URL.Path
-		query := c.Request.URL.RawQuery
-
-		c.Next()
-
-		latency := time.Since(start)
-
-		logger.Info("HTTP request",
-			zap.Int("status", c.Writer.Status()),
-			zap.String("method", c.Request.Method),
-			zap.String("path", path),
-			zap.String("query", query),
-			zap.String("ip", c.ClientIP()),
-			zap.Duration("latency", latency),
-			zap.String("user-agent", c.Request.UserAgent()),
-		)
-	}
+func (s *Server) Metrics() *monitor.Metrics {
+	return s.metrics
 }
 
-// CORSMiddleware handles Cross-Origin Resource Sharing
-func CORSMiddleware() gin.HandlerFunc {
+func (s *Server) MetricsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
+		if s.metrics == nil {
+			c.Next()
 			return
 		}
 
+		start := time.Now()
+		route := c.FullPath()
+		if route == "" {
+			route = c.Request.URL.Path
+		}
+		s.metrics.HTTP.IncInflight(route, c.Request.Method)
+		defer s.metrics.HTTP.DecInflight(route, c.Request.Method)
+
 		c.Next()
+
+		s.metrics.HTTP.Observe(route, c.Request.Method, strconv.Itoa(c.Writer.Status()), time.Since(start))
 	}
 }
