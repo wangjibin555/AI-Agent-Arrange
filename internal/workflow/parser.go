@@ -62,6 +62,15 @@ func (p *Parser) ParseYAML(content []byte) (*Workflow, error) {
 	return &wf, nil
 }
 
+// ParseYAMLCompiled parses YAML and compiles it into a runtime plan.
+func (p *Parser) ParseYAMLCompiled(content []byte) (*CompiledWorkflow, error) {
+	wf, err := p.ParseYAML(content)
+	if err != nil {
+		return nil, err
+	}
+	return CompileWorkflow(wf)
+}
+
 // ParseJSON parses a workflow from JSON content
 func (p *Parser) ParseJSON(content []byte) (*Workflow, error) {
 	p.resetWarnings()
@@ -78,6 +87,15 @@ func (p *Parser) ParseJSON(content []byte) (*Workflow, error) {
 	return &wf, nil
 }
 
+// ParseJSONCompiled parses JSON and compiles it into a runtime plan.
+func (p *Parser) ParseJSONCompiled(content []byte) (*CompiledWorkflow, error) {
+	wf, err := p.ParseJSON(content)
+	if err != nil {
+		return nil, err
+	}
+	return CompileWorkflow(wf)
+}
+
 // ParseYAMLFile parses a workflow from a YAML file
 func (p *Parser) ParseYAMLFile(filepath string) (*Workflow, error) {
 	content, err := os.ReadFile(filepath)
@@ -88,6 +106,15 @@ func (p *Parser) ParseYAMLFile(filepath string) (*Workflow, error) {
 	return p.ParseYAML(content)
 }
 
+func (p *Parser) ParseYAMLFileCompiled(filepath string) (*CompiledWorkflow, error) {
+	content, err := os.ReadFile(filepath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	return p.ParseYAMLCompiled(content)
+}
+
 // ParseJSONFile parses a workflow from a JSON file
 func (p *Parser) ParseJSONFile(filepath string) (*Workflow, error) {
 	content, err := os.ReadFile(filepath)
@@ -96,6 +123,15 @@ func (p *Parser) ParseJSONFile(filepath string) (*Workflow, error) {
 	}
 
 	return p.ParseJSON(content)
+}
+
+func (p *Parser) ParseJSONFileCompiled(filepath string) (*CompiledWorkflow, error) {
+	content, err := os.ReadFile(filepath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	return p.ParseJSONCompiled(content)
 }
 
 // validate validates a workflow definition
@@ -122,8 +158,8 @@ func (p *Parser) validate(wf *Workflow) error {
 		stepIDs[step.ID] = true
 		stepMap[step.ID] = step
 
-		if step.AgentName == "" {
-			return apperr.InvalidArgumentf("step %s: agent name is required", step.ID).WithCode("workflow_step_agent_required")
+		if step.AgentName == "" && step.Capability == "" {
+			return apperr.InvalidArgumentf("step %s: agent name or capability is required", step.ID).WithCode("workflow_step_agent_required")
 		}
 
 		if step.Action == "" {

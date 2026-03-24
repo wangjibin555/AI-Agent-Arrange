@@ -63,66 +63,21 @@ func (e *StreamingEngine) Execute(ctx context.Context, workflow *Workflow, varia
 		return e.Engine.Execute(ctx, workflow, variables)
 	}
 
-	// 验证工作流
-	if workflow != nil && workflow.Name == "" && workflow.ID != "" {
-		workflow.Name = workflow.ID
-	}
-	if err := ValidateDefinition(workflow); err != nil {
+	compiled, err := CompileWorkflow(workflow)
+	if err != nil {
 		return nil, err
 	}
-	dag, err := NewDAG(workflow.Steps)
+
+	execution, runCtx, err := e.bootstrapExecution(ctx, workflow, compiled, executionBootstrapOptions{
+		Variables:             variables,
+		InitializeCheckpoints: true,
+	})
 	if err != nil {
-		return nil, apperr.InvalidArgument("invalid workflow").WithCode("workflow_structure_invalid").WithCause(err)
+		return nil, err
 	}
-
-	// 创建执行上下文
-	execution := &WorkflowExecution{
-		ID:              uuid.New().String(),
-		WorkflowID:      workflow.ID,
-		Status:          WorkflowStatusRunning,
-		RecoveryStatus:  RecoveryStatusNone,
-		StepExecutions:  make(map[string]*StepExecution),
-		Context:         NewExecutionContext(variables),
-		Checkpoints:     make(map[string]*StreamCheckpoint),
-		RouteSelections: make(map[string]string),
-		StartedAt:       time.Now(),
-	}
-
-	// 初始化workflow变量
-	if workflow.Variables != nil {
-		for k, v := range workflow.Variables {
-			execution.Context.SetVariable(k, v)
-		}
-	}
-
-	// 缓存执行
-	e.mu.Lock()
-	e.executionCache[execution.ID] = execution
-	e.mu.Unlock()
-
-	// Streaming workflow execution is asynchronous and must outlive the HTTP request context.
-	// Keep context values, but detach from request cancellation.
-	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	e.registerExecutionStop(execution.ID, cancel)
-
-	// 保存到repository
-	if err := e.persistWorkflowDefinition(ctx, workflow); err != nil {
-		return nil, apperr.Internal("failed to save workflow definition").
-			WithCode("workflow_definition_persist_failed").
-			WithCause(err)
-	}
-	if err := e.persistExecutionSnapshot(ctx, execution); err != nil {
-		return nil, apperr.Internal("failed to save execution").
-			WithCode("workflow_execution_persist_failed").
-			WithCause(err)
-	}
-
-	// 发布开始事件
-	e.observeWorkflowStarted(workflow)
-	e.publishEvent(execution.ID, "workflow_started", string(WorkflowStatusRunning), "Workflow execution started", nil)
 
 	// 在后台执行工作流
-	go e.executeWorkflowStreaming(runCtx, workflow, dag, execution)
+	go e.executeWorkflowStreaming(runCtx, compiled, execution)
 
 	return execution, nil
 }
@@ -138,459 +93,40 @@ func (e *StreamingEngine) hasStreamingSteps(workflow *Workflow) bool {
 }
 
 // executeWorkflowStreaming 执行流式工作流
-func (e *StreamingEngine) executeWorkflowStreaming(ctx context.Context, workflow *Workflow, dag *DAG, execution *WorkflowExecution) {
-	e.executeWorkflowStreamingWithState(ctx, workflow, dag, execution, make(map[string]bool), make(map[string]bool))
+func (e *StreamingEngine) executeWorkflowStreaming(ctx context.Context, workflow *CompiledWorkflow, execution *WorkflowExecution) {
+	e.executeWorkflowStreamingWithState(ctx, workflow, execution, make(map[string]bool), make(map[string]bool))
 }
 
 func (e *StreamingEngine) executeWorkflowStreamingWithState(
 	ctx context.Context,
-	workflow *Workflow,
-	dag *DAG,
+	workflow *CompiledWorkflow,
 	execution *WorkflowExecution,
 	completedSteps map[string]bool,
 	failedSteps map[string]bool,
 ) {
-	// 设置超时
-	timeout := e.defaultTimeout
-	if workflow.Timeout != nil {
-		timeout = *workflow.Timeout
-	}
-
-	execCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
 	// 清理资源
 	defer e.cleanupBuffers(execution.ID)
-
-	// 跟踪步骤状态
-	runningSteps := make(map[string]bool)
-	mu := &sync.Mutex{}
-	triggerManager := NewTriggerManager()
-
-	// 统计总步骤数
-	totalSteps := len(workflow.Steps)
-
-	// 为每个步骤创建Trigger
-	stepMap := make(map[string]*Step)
-	for _, step := range workflow.Steps {
-		stepMap[step.ID] = step
-
-		// 获取所有依赖的缓冲区
-		buffers := make(map[string]*StreamBuffer)
-		for _, depID := range step.DependsOn {
-			if buffer := e.getBuffer(execution.ID, depID); buffer != nil {
-				buffers[depID] = buffer
-			}
-		}
-
-		// 创建并注册多buffer Trigger
-		trigger := NewMultiTrigger(step.ID, step, buffers)
-		triggerManager.RegisterTrigger(step.ID, trigger)
-	}
-
-	// 并发控制
-	semaphore := make(chan struct{}, e.maxConcurrency)
-	var wg sync.WaitGroup
-
-	// 启动异步触发监控循环
-	monitorDone := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(100 * time.Millisecond) // 每100ms检查一次
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-execCtx.Done():
-				close(monitorDone)
-				return
-			case <-ticker.C:
-				// 检查是否所有步骤都完成
-				mu.Lock()
-				finishedCount := len(completedSteps) + len(failedSteps)
-				mu.Unlock()
-
-				if finishedCount >= totalSteps {
-					close(monitorDone)
-					return
-				}
-
-				// 检查哪些步骤应该触发
-				for _, step := range workflow.Steps {
-					trigger := triggerManager.GetTrigger(step.ID)
-					if trigger == nil {
-						continue
-					}
-
-					// 检查是否已在运行或已完成
-					mu.Lock()
-					isRunning := runningSteps[step.ID]
-					isCompleted := completedSteps[step.ID] || failedSteps[step.ID]
-					mu.Unlock()
-
-					if isRunning || isCompleted {
-						continue
-					}
-
-					decision, reason, err := e.evaluateStepDecision(workflow, step, execution, completedSteps, failedSteps)
-					//节点Route失败，表示当前节点无法被触发，进行报错，并且按失败路径进行处理
-					if err != nil {
-						mu.Lock()
-						failedSteps[step.ID] = true
-						mu.Unlock()
-						e.failStep(&StepExecution{
-							StepID:    step.ID,
-							Status:    WorkflowStatusRunning,
-							StartedAt: time.Now(),
-						}, execution, apperr.Internal("failed to evaluate step decision").
-							WithCode("workflow_step_decision_failed").
-							WithCause(err))
-						continue
-					}
-					//节点等待，还不能触发
-					if decision == StepDecisionWait {
-						continue
-					}
-					//节点跳过，则标记为已经触发
-					if decision == StepDecisionSkip {
-						mu.Lock()
-						completedSteps[step.ID] = true
-						mu.Unlock()
-						e.skipStep(step, execution, reason)
-						trigger.MarkTriggered()
-						continue
-					}
-
-					// 动态更新所有依赖的buffers（因为创建trigger时buffer可能还不存在）
-					if len(step.DependsOn) > 0 {
-						buffers := make(map[string]*StreamBuffer)
-						for _, depID := range step.DependsOn {
-							if buffer := e.getBuffer(execution.ID, depID); buffer != nil {
-								buffers[depID] = buffer
-							}
-						}
-						// 更新trigger的buffers
-						trigger.UpdateBuffers(buffers)
-					}
-
-					// 检查是否应该触发
-					shouldTrigger, reason := trigger.ShouldTrigger()
-					if !shouldTrigger && execution.ResumeState != nil &&
-						step.Streaming != nil && step.Streaming.WaitFor == "full" {
-						allDepsCompleted := true
-						for _, depID := range step.DependsOn {
-							if !completedSteps[depID] {
-								allDepsCompleted = false
-								break
-							}
-						}
-						if allDepsCompleted {
-							shouldTrigger = true
-							reason = "resume_all_deps_completed"
-						}
-					}
-					if !shouldTrigger {
-						continue
-					}
-
-					// 检查依赖是否满足
-					// 注意：对于流式步骤，不需要等待依赖完成，
-					// 只需要满足trigger条件（如MinStartTokens）即可
-					depsReady := true
-					for _, depID := range step.DependsOn {
-						mu.Lock()
-						// 检查依赖是否失败
-						if failedSteps[depID] {
-							depsReady = false
-						}
-						// 对于流式步骤，只要依赖已开始（有buffer）即可，不需要等待完成
-						mu.Unlock()
-						if !depsReady {
-							break
-						}
-					}
-
-					if !depsReady {
-						continue
-					}
-
-					// 标记为已触发
-					trigger.MarkTriggered()
-
-					// 标记为运行中
-					mu.Lock()
-					runningSteps[step.ID] = true
-					mu.Unlock()
-
-					// 发布触发事件
-					e.publishEvent(execution.ID, "step_triggered", string(WorkflowStatusRunning),
-						fmt.Sprintf("Step %s triggered (reason: %s)", step.ID, reason),
-						map[string]interface{}{
-							"step_id": step.ID,
-							"reason":  reason,
-						})
-
-					// 异步执行步骤
-					wg.Add(1)
-					semaphore <- struct{}{} // 获取信号量
-
-					go func(s *Step) {
-						defer wg.Done()
-						defer func() { <-semaphore }() // 释放信号量
-
-						// 执行步骤
-						var err error
-						if s.Streaming != nil && s.Streaming.Enabled {
-							//流式状态执行
-							err = e.executeStepStreaming(execCtx, s, execution)
-						} else {
-							//阻塞执行
-							err = e.Engine.executeStep(execCtx, s, execution)
-						}
-
-						// 更新状态
-						mu.Lock()
-						delete(runningSteps, s.ID)
-						if err != nil {
-							failedSteps[s.ID] = true
-						} else {
-							completedSteps[s.ID] = true
-						}
-						mu.Unlock()
-					}(step)
-				}
-			}
-		}
-	}()
-
-	// 等待监控循环结束
-	<-monitorDone
-
-	// 等待所有执行的步骤完成
-	wg.Wait()
-
-	if execCtx.Err() == context.Canceled {
-		e.finishExecution(execution, WorkflowStatusCancelled, "Execution cancelled by user")
-		return
-	}
-
-	// 检查结果
-	mu.Lock()
-	hasFailed := len(failedSteps) > 0
-	mu.Unlock()
-
-	if hasFailed {
-		mu.Lock()
-		failedStepList := make([]string, 0, len(failedSteps))
-		for stepID := range failedSteps {
-			failedStepList = append(failedStepList, stepID)
-		}
-		mu.Unlock()
-
-		if workflow.OnFailure != nil && workflow.OnFailure.Rollback {
-			e.rollbackStreamingWorkflow(execCtx, workflow, execution, completedSteps)
-		}
-
-		e.finishExecution(execution, WorkflowStatusFailed,
-			fmt.Sprintf("Workflow failed: steps %v failed", failedStepList))
-		return
-	}
-
-	// 所有步骤成功完成
-	e.finishExecution(execution, WorkflowStatusCompleted, "Workflow completed successfully")
+	kernel := newRuntimeKernel(
+		e.Engine,
+		e,
+		workflow,
+		execution,
+		e.newStepExecutor(),
+		completedSteps,
+		failedSteps,
+		func(ctx context.Context, completed map[string]bool) {
+			e.rollbackStreamingWorkflow(ctx, workflow, execution, completed)
+		},
+	)
+	e.Engine.runExecutionLifecycle(ctx, workflow.Source, execution, kernel.Run)
 }
 
 // executeStepStreaming 执行流式步骤
 func (e *StreamingEngine) executeStepStreaming(ctx context.Context, step *Step, execution *WorkflowExecution) error {
-	// 创建步骤执行记录
-	stepExec := &StepExecution{
-		StepID:    step.ID,
-		Status:    WorkflowStatusRunning,
-		StartedAt: time.Now(),
-		Metadata: map[string]interface{}{
-			"step_type": workflowStepType(step),
-		},
-	}
-
-	e.mu.Lock()
-	execution.StepExecutions[step.ID] = stepExec
-	execution.CurrentStep = step.ID
-	e.mu.Unlock()
-	_ = e.persistExecutionSnapshot(context.Background(), execution)
-
-	e.publishEvent(execution.ID, "step_started", string(WorkflowStatusRunning),
-		fmt.Sprintf("Step %s started (streaming mode)", step.ID),
-		map[string]interface{}{"step_id": step.ID, "streaming": true})
-	e.observeStepStarted(execution.WorkflowID, step, stepExec)
-
-	// 创建流式缓冲区
-	buffer := NewStreamBuffer(step.ID, step.Streaming)
-	e.registerBuffer(execution.ID, step.ID, buffer)
-
-	// 如果等待模式是partial，订阅上游并等待初始数据
-	if step.Streaming.WaitFor == "partial" && len(step.DependsOn) > 0 {
-		if err := e.subscribeToUpstream(ctx, step, execution, buffer); err != nil {
-			switch e.getStreamingOnError(step) {
-			case "continue":
-				e.publishEvent(execution.ID, "step_stream_error_continue", string(WorkflowStatusRunning),
-					fmt.Sprintf("Step %s continuing after upstream subscription error", step.ID),
-					map[string]interface{}{
-						"step_id": step.ID,
-						"phase":   "subscribe_upstream",
-						"error":   err.Error(),
-					})
-			case "fallback":
-				return e.executeStepStreamingFallback(ctx, step, execution, stepExec, buffer,
-					apperr.Internal("failed to subscribe upstream").WithCode("workflow_stream_subscribe_failed").WithCause(err))
-			default:
-				buffer.MarkComplete()
-				return e.failStep(stepExec, execution, apperr.Internal("failed to subscribe upstream").WithCode("workflow_stream_subscribe_failed").WithCause(err))
-			}
-		}
-	}
-
-	// 渲染参数（此时已确保有初始数据）
-	engine := NewTemplateEngine(execution.Context)
-	renderedParams, err := engine.RenderParameters(step.Parameters)
-	if err != nil {
-		if e.getStreamingOnError(step) == "fallback" {
-			return e.executeStepStreamingFallback(ctx, step, execution, stepExec, buffer,
-				apperr.InvalidArgument("failed to render parameters").WithCode("workflow_step_params_render_failed").WithCause(err))
-		}
-		buffer.MarkComplete()
-		return e.failStep(stepExec, execution, apperr.InvalidArgument("failed to render parameters").WithCode("workflow_step_params_render_failed").WithCause(err))
-	}
-
-	// 执行步骤（带重试）
-	maxRetries := step.Retries
-	if maxRetries == 0 {
-		maxRetries = 1
-	}
-
-	var lastErr error
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		if attempt > 0 {
-			stepExec.RetryCount++
-			e.publishEvent(execution.ID, "step_retry", string(WorkflowStatusRunning),
-				fmt.Sprintf("Retrying step %s (attempt %d/%d)", step.ID, attempt+1, maxRetries),
-				map[string]interface{}{"step_id": step.ID, "retry_count": attempt})
-		}
-
-		// 创建任务
-		taskID := uuid.New().String()
-		stepExec.TaskID = taskID
-
-		// 创建流式回调
-		streamCallback := func(chunk map[string]interface{}) {
-			// 写入缓冲区
-			buffer.Write(StreamChunk{
-				Index:     buffer.TotalChunks(),
-				Data:      chunk,
-				Tokens:    e.estimateTokens(chunk),
-				Timestamp: time.Now(),
-			})
-			e.saveStreamingCheckpoint(execution, step.ID, buffer, nil)
-
-			// 发布流式事件
-			e.publishEvent(execution.ID, "step_streaming", string(WorkflowStatusRunning),
-				fmt.Sprintf("Step %s streaming data", step.ID),
-				map[string]interface{}{
-					"step_id":      step.ID,
-					"chunk_index":  buffer.TotalChunks() - 1,
-					"total_tokens": buffer.TotalTokens(),
-				})
-		}
-
-		// 创建ContextReader
-		contextReader := e.newExecutionContextReader(execution)
-
-		taskInput := &agent.TaskInput{
-			TaskID:         taskID,
-			Action:         step.Action,
-			Parameters:     renderedParams,
-			Context:        make(map[string]interface{}),
-			StreamCallback: streamCallback,
-			ContextReader:  contextReader, // 传递动态Context访问
-		}
-
-		// 如果引擎有eventPublisher，将其适配为agent.EventPublisher
-		if e.eventPublisher != nil {
-			taskInput.EventPublisher = &agentEventPublisherAdapter{
-				workflowPublisher: e.eventPublisher,
-				executionID:       execution.ID,
-				stepID:            step.ID,
-			}
-		}
-
-		// 获取agent
-		ag, err := e.agentRegistry.Get(step.AgentName)
-		if err != nil {
-			lastErr = apperr.NotFoundf("agent not found: %s", step.AgentName).WithCode("workflow_step_agent_not_found")
-			continue
-		}
-
-		// 设置超时
-		stepCtx := ctx
-		if step.Timeout != nil {
-			var cancel context.CancelFunc
-			stepCtx, cancel = context.WithTimeout(ctx, *step.Timeout)
-			defer cancel()
-		}
-
-		attemptCtx, cancelAttempt := context.WithCancel(stepCtx)
-		detectedErrCh := make(chan error, 1)
-		e.startStreamErrorMonitor(attemptCtx, step, execution, stepExec, buffer, func(err error) {
-			select {
-			case detectedErrCh <- err:
-			default:
-			}
-			cancelAttempt()
-		})
-
-		// 执行agent任务
-		output, err := ag.Execute(attemptCtx, taskInput)
-		cancelAttempt()
-
-		select {
-		case detectedErr := <-detectedErrCh:
-			lastErr = detectedErr
-			if err == nil || err == context.Canceled {
-				err = detectedErr
-			}
-		default:
-		}
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		if !output.Success {
-			lastErr = apperr.Internalf("step execution failed: %s", output.Error).WithCode("workflow_step_execution_failed")
-			continue
-		}
-
-		// 成功
-		return e.completeStreamingStep(
-			step,
-			execution,
-			stepExec,
-			buffer,
-			output.Result,
-			fmt.Sprintf("Step %s completed successfully (streaming)", step.ID),
-			"step_completed",
-		)
-	}
-
-	// 所有重试失败
-	e.restoreFromCheckpoint(execution, step.ID, buffer)
-	switch e.getStreamingOnError(step) {
-	case "continue":
-		return e.completeStreamingStepWithPartialData(step, execution, stepExec, buffer, lastErr)
-	case "fallback":
-		return e.executeStepStreamingFallback(ctx, step, execution, stepExec, buffer, lastErr)
-	default:
-		buffer.MarkComplete()
-		return e.failStep(stepExec, execution, lastErr)
-	}
+	return e.newStepExecutor().Execute(ctx, &CompiledStep{
+		ID:      step.ID,
+		Runtime: step,
+	}, execution)
 }
 
 func (e *StreamingEngine) getStreamingOnError(step *Step) string {
@@ -609,41 +145,20 @@ func (e *StreamingEngine) completeStreamingStep(
 	message string,
 	eventType string,
 ) error {
-	if result == nil {
-		result = make(map[string]interface{})
-	}
-	stepExec.Result = result
-	stepExec.Status = WorkflowStatusCompleted
-	now := time.Now()
-	stepExec.CompletedAt = &now
-
 	e.saveStreamingCheckpoint(execution, step.ID, buffer, result)
 	buffer.MarkComplete()
 
-	execution.Context.SetStepOutput(step.ID, result)
-	if step.OutputAlias != "" {
-		execution.Context.SetVariable(step.OutputAlias, result)
-	}
-	e.notifyExecutionContextChange(execution)
-	if step.Route != nil {
-		selectedRoute, targets, err := e.applyRouteSelection(step, execution)
-		if err != nil {
-			return e.failStep(stepExec, execution, apperr.Internal("failed to apply route selection").WithCode("workflow_route_apply_failed").WithCause(err))
-		}
-		stepExec.Metadata["route"] = selectedRoute
-		stepExec.Metadata["route_targets"] = targets
-	}
-	_ = e.persistExecutionSnapshot(context.Background(), execution)
-
-	e.publishEvent(execution.ID, eventType, string(WorkflowStatusCompleted), message, map[string]interface{}{
+	eventData := map[string]interface{}{
 		"step_id":      step.ID,
 		"result":       result,
 		"total_tokens": buffer.TotalTokens(),
 		"total_chunks": buffer.TotalChunks(),
+	}
+	return e.executionState().CompleteStepWithOptions(execution, step, stepExec, result, StepCompletionOptions{
+		EventType: eventType,
+		Message:   message,
+		EventData: eventData,
 	})
-	e.observeStepFinished(execution.WorkflowID, stepExec, string(WorkflowStatusCompleted))
-
-	return nil
 }
 
 func (e *StreamingEngine) completeStreamingStepWithPartialData(
@@ -711,8 +226,7 @@ func (e *StreamingEngine) executeStepStreamingFallback(
 		return e.failStep(stepExec, execution, apperr.Internal("fallback dependency wait failed").WithCode("workflow_stream_fallback_dependency_wait_failed").WithCause(err))
 	}
 
-	engine := NewTemplateEngine(execution.Context)
-	renderedParams, err := engine.RenderParameters(step.Parameters)
+	renderedParams, err := e.renderStepParameters(execution.Context, step)
 	if err != nil {
 		buffer.MarkComplete()
 		return e.failStep(stepExec, execution, apperr.InvalidArgument("fallback render failed").WithCode("workflow_stream_fallback_render_failed").WithCause(err))
@@ -738,10 +252,14 @@ func (e *StreamingEngine) executeStepStreamingFallback(
 		}
 	}
 
-	ag, err := e.agentRegistry.Get(step.AgentName)
+	ag, err := e.resolveStepAgent(step)
 	if err != nil {
 		buffer.MarkComplete()
-		return e.failStep(stepExec, execution, apperr.NotFoundf("fallback agent not found: %s", step.AgentName).WithCode("workflow_step_agent_not_found"))
+		return e.failStep(stepExec, execution, err)
+	}
+	if err := validateAgentInputContract(ag, step, taskInput.Parameters); err != nil {
+		buffer.MarkComplete()
+		return e.failStep(stepExec, execution, err)
 	}
 
 	stepCtx := ctx
@@ -755,6 +273,12 @@ func (e *StreamingEngine) executeStepStreamingFallback(
 	if err != nil {
 		buffer.MarkComplete()
 		return e.failStep(stepExec, execution, apperr.Internal("fallback execution failed").WithCode("workflow_stream_fallback_execution_failed").WithCause(err))
+	}
+	if output != nil && output.Success {
+		if err := validateAgentOutputContract(ag, step, output.Result); err != nil {
+			buffer.MarkComplete()
+			return e.failStep(stepExec, execution, err)
+		}
 	}
 	if !output.Success {
 		buffer.MarkComplete()
@@ -828,7 +352,7 @@ func (e *StreamingEngine) seedUpstreamFinalOutput(execution *WorkflowExecution, 
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if execution.Context.Outputs[depID] != nil && len(execution.Context.Outputs[depID]) > 0 {
+	if output, exists := execution.Context.GetStepOutput(depID); exists && len(output) > 0 {
 		return true
 	}
 
@@ -837,10 +361,7 @@ func (e *StreamingEngine) seedUpstreamFinalOutput(execution *WorkflowExecution, 
 		return false
 	}
 
-	execution.Context.Outputs[depID] = make(map[string]interface{}, len(stepExec.Result))
-	for k, v := range stepExec.Result {
-		execution.Context.Outputs[depID][k] = v
-	}
+	execution.Context.SetStepOutput(depID, stepExec.Result)
 	return true
 }
 
@@ -890,16 +411,10 @@ func (e *StreamingEngine) subscribeToUpstream(ctx context.Context, step *Step, e
 				e.mu.Lock()
 				stepExec := execution.StepExecutions[depStepID]
 				stepCompleted := stepExec != nil && stepExec.Status == WorkflowStatusCompleted
-				if !stepCompleted {
-					if execution.Context.Outputs[depStepID] == nil {
-						execution.Context.Outputs[depStepID] = make(map[string]interface{})
-					}
-					// 累积部分数据
-					for k, v := range chunk.Data {
-						execution.Context.Outputs[depStepID][k] = v
-					}
-				}
 				e.mu.Unlock()
+				if !stepCompleted {
+					execution.Context.MergeStepOutput(depStepID, chunk.Data)
+				}
 
 				// 通知等待中的 ContextReader 重新检查字段
 				e.notifyExecutionContextChange(execution)
@@ -1029,7 +544,7 @@ func (e *StreamingEngine) GetStreamingStatus(executionID string) map[string]inte
 type executionContextReader struct {
 	execution *WorkflowExecution
 	mu        *sync.RWMutex
-	cond      *sync.Cond // 条件变量，用于数据变更通知
+	notifier  *executionNotifier
 }
 
 // newExecutionContextReader 创建ContextReader
@@ -1037,39 +552,23 @@ func (e *StreamingEngine) newExecutionContextReader(execution *WorkflowExecution
 	return &executionContextReader{
 		execution: execution,
 		mu:        &e.mu,
-		cond:      e.getExecutionNotifier(execution),
+		notifier:  e.getExecutionNotifier(execution),
 	}
 }
 
 // GetStepOutput 获取步骤输出（返回副本，线程安全）
 func (r *executionContextReader) GetStepOutput(stepID string) (map[string]interface{}, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	output, exists := r.execution.Context.Outputs[stepID]
-	if !exists || output == nil {
-		return nil, false
-	}
-
-	// 返回副本，避免并发修改
-	return copyMap(output), true
+	return r.execution.Context.GetStepOutput(stepID)
 }
 
 // GetVariable 获取全局变量
 func (r *executionContextReader) GetVariable(key string) (interface{}, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	value, exists := r.execution.Context.Variables[key]
-	return value, exists
+	return r.execution.Context.GetVariable(key)
 }
 
 // GetField 获取嵌套字段，支持路径如 "result.summary"
 func (r *executionContextReader) GetField(stepID string, fieldPath string) (interface{}, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	output, exists := r.execution.Context.Outputs[stepID]
+	output, exists := r.execution.Context.GetStepOutput(stepID)
 	if !exists || output == nil {
 		return nil, false
 	}
@@ -1085,8 +584,8 @@ func (r *executionContextReader) WaitForField(stepID string, fieldPath string, t
 
 	for {
 		// 先尝试获取字段
+		output, _ := r.execution.Context.GetStepOutput(stepID)
 		r.mu.RLock()
-		output := r.execution.Context.Outputs[stepID]
 		stepExec := r.execution.StepExecutions[stepID]
 		r.mu.RUnlock()
 
@@ -1114,20 +613,19 @@ func (r *executionContextReader) WaitForField(stepID string, fieldPath string, t
 			return nil, apperr.Conflictf("timeout waiting for field %s.%s", stepID, fieldPath).WithCode("workflow_field_wait_timeout")
 		}
 
-		// 等待通知或超时
-		waitChan := make(chan struct{})
-		go func() {
-			r.cond.L.Lock()
-			r.cond.Wait()
-			r.cond.L.Unlock()
-			close(waitChan)
-		}()
+		waitTimeout := 100 * time.Millisecond
+		if remaining := time.Until(deadline); remaining < waitTimeout {
+			waitTimeout = remaining
+		}
+		if waitTimeout <= 0 {
+			return nil, apperr.Conflictf("timeout waiting for field %s.%s", stepID, fieldPath).WithCode("workflow_field_wait_timeout")
+		}
 
 		select {
-		case <-waitChan:
+		case <-r.notifier.WaitChan():
 			// 收到通知，重新检查
 			continue
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(waitTimeout):
 			// 超时保护，避免死锁
 			continue
 		}
@@ -1149,7 +647,9 @@ func (r *executionContextReader) IsStepCompleted(stepID string) bool {
 
 // notifyContextChange 通知Context变更（在数据写入后调用）
 func (r *executionContextReader) notifyContextChange() {
-	r.cond.Broadcast()
+	if r.notifier != nil {
+		r.notifier.Notify()
+	}
 }
 
 // copyMap 深拷贝map（避免并发修改）

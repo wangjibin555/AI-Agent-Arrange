@@ -26,6 +26,17 @@ type Agent interface {
 	Shutdown() error
 }
 
+// ActionContract describes weak input/output requirements for a specific agent action.
+type ActionContract struct {
+	InputRequired  []string `json:"input_required,omitempty"`
+	OutputRequired []string `json:"output_required,omitempty"`
+}
+
+// ActionContractProvider is an optional interface for agents that can describe action contracts.
+type ActionContractProvider interface {
+	GetActionContract(action string) (*ActionContract, bool)
+}
+
 // TaskInput represents the input data for an agent task
 type TaskInput struct {
 	TaskID         string                             `json:"task_id"`

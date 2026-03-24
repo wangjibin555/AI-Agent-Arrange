@@ -221,6 +221,63 @@ func TestStreamingEngine_DynamicRouteExecutesSelectedBranch(t *testing.T) {
 	}
 }
 
+func TestTemplateEngine_RenderFloat32WithoutPanic(t *testing.T) {
+	engine := NewTemplateEngine(NewExecutionContext(map[string]interface{}{
+		"score": float32(1.25),
+	}))
+
+	rendered, err := engine.Render("{{score}}")
+	if err != nil {
+		t.Fatalf("render float32: %v", err)
+	}
+	if rendered != "1.25" {
+		t.Fatalf("expected rendered float32 to be 1.25, got %q", rendered)
+	}
+}
+
+func TestTemplateEngine_EvaluateConditionUsesTypedOperands(t *testing.T) {
+	ctx := NewExecutionContext(map[string]interface{}{
+		"run_optional": true,
+		"score":        float32(0.85),
+		"user": map[string]interface{}{
+			"role": "admin",
+		},
+	})
+	ctx.SetStepOutput("classify", map[string]interface{}{
+		"score":   0.91,
+		"enabled": true,
+		"count":   3,
+	})
+	engine := NewTemplateEngine(ctx)
+
+	cases := []struct {
+		name string
+		expr string
+		want bool
+	}{
+		{name: "float32 numeric compare", expr: "{{score}} > 0.8", want: true},
+		{name: "step output numeric compare", expr: "{{classify.score}} >= 0.9", want: true},
+		{name: "bool compare", expr: "{{run_optional}} == true", want: true},
+		{name: "nested global compare", expr: "{{user.role}} == \"admin\"", want: true},
+		{name: "direct context expression compare", expr: "user.role == \"admin\"", want: true},
+		{name: "step field compare", expr: "{{classify.result.count}} == 3", want: true},
+		{name: "truthy operand", expr: "{{classify.enabled}}", want: true},
+		{name: "false compare", expr: "{{classify.score}} < 0.5", want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := engine.EvaluateCondition(tc.expr)
+			if err != nil {
+				t.Fatalf("evaluate condition %q: %v", tc.expr, err)
+			}
+			if got != tc.want {
+				t.Fatalf("condition %q = %v, want %v", tc.expr, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEngine_RuntimeFailureStoresStructuredErrorCode(t *testing.T) {
 	publisher := &recordingWorkflowEventPublisher{}
 	engine, _ := newTestEngine(t, publisher)

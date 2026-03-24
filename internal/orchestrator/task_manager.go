@@ -221,12 +221,25 @@ func (tm *TaskManager) PullNextTask(ctx context.Context) (*Task, error) {
 	}
 
 	// 分配 Agent
+	previousAgentName := task.AgentName
 	task.AgentName = selectedAgent.GetName()
 
 	// 标记为运行中
+	previousStatus := task.Status
+	previousStartedAt := task.StartedAt
 	task.Status = TaskStatusRunning
 	now := time.Now()
 	task.StartedAt = &now
+
+	if tm.repository != nil {
+		if err := tm.repository.Update(ctx, cloneTask(task)); err != nil {
+			task.AgentName = previousAgentName
+			task.Status = previousStatus
+			task.StartedAt = previousStartedAt
+			return nil, fmt.Errorf("failed to persist running task: %w", err)
+		}
+	}
+
 	tm.observeTaskStarted(task)
 
 	// 发布任务开始事件
@@ -250,6 +263,41 @@ func (tm *TaskManager) PullNextTask(ctx context.Context) (*Task, error) {
 	tm.observeAgentLoadLocked(task.AgentName)
 
 	return task, nil
+}
+
+func cloneTask(task *Task) *Task {
+	if task == nil {
+		return nil
+	}
+
+	cloned := *task
+	if task.Parameters != nil {
+		cloned.Parameters = make(map[string]interface{}, len(task.Parameters))
+		for key, value := range task.Parameters {
+			cloned.Parameters[key] = value
+		}
+	}
+	if task.RequestMetadata != nil {
+		cloned.RequestMetadata = make(map[string]string, len(task.RequestMetadata))
+		for key, value := range task.RequestMetadata {
+			cloned.RequestMetadata[key] = value
+		}
+	}
+	if task.Dependencies != nil {
+		cloned.Dependencies = append([]string(nil), task.Dependencies...)
+	}
+	if task.Result != nil {
+		cloned.Result = make(map[string]interface{}, len(task.Result))
+		for key, value := range task.Result {
+			cloned.Result[key] = value
+		}
+	}
+	if task.RetryCount != nil {
+		retryCount := *task.RetryCount
+		cloned.RetryCount = &retryCount
+	}
+
+	return &cloned
 }
 
 // WaitForTask blocks until a task is available or context is cancelled
@@ -282,54 +330,32 @@ func (tm *TaskManager) GetRegistry() *agent.Registry {
 
 // selectAgentForTask selects the best agent for a task based on capability and load balancing
 func (tm *TaskManager) selectAgentForTask(task *Task) (agent.Agent, error) {
-	// 情况1: 任务已经指定了 Agent，直接返回
-	if task.AgentName != "" {
-		return tm.registry.Get(task.AgentName)
-	}
+	resolver := agent.NewResolver(tm.registry)
+	return resolver.Resolve(agent.ResolveRequest{
+		AgentName:          task.AgentName,
+		Capability:         task.RequiredCapability,
+		FallbackCapability: inferCapabilityFromAction(task.Action),
+	}, agent.ResolveHooks{
+		OnCapabilityNotFound: func(capability string) error {
+			return apperr.NotFoundf("no agent with capability '%s' found", capability).WithCode("agent_capability_not_found")
+		},
+		OnRegistryEmpty: func() error {
+			return apperr.NotFound("no agents registered").WithCode("agent_registry_empty")
+		},
+		SelectCandidate: tm.selectLeastLoadedCandidate,
+	})
+}
 
-	// 情况2: 根据能力筛选候选 Agent
-	var candidateAgents []agent.Agent
-
-	if task.RequiredCapability != "" {
-		// 2.1 有明确的能力要求，筛选支持该能力的 Agent
-		candidateAgents = tm.registry.FindByCapability(task.RequiredCapability)
-		if len(candidateAgents) == 0 {
-			return nil, apperr.NotFoundf("no agent with capability '%s' found", task.RequiredCapability).WithCode("agent_capability_not_found")
-		}
-	} else {
-		// 2.2 没有指定能力，尝试从 Action 推断
-		inferredCapability := inferCapabilityFromAction(task.Action)
-		if inferredCapability != "" {
-			candidateAgents = tm.registry.FindByCapability(inferredCapability)
-		}
-
-		// 如果推断失败或没找到，使用所有 Agent
-		if len(candidateAgents) == 0 {
-			allAgents := tm.registry.GetAll()
-			if len(allAgents) == 0 {
-				return nil, apperr.NotFound("no agents registered").WithCode("agent_registry_empty")
-			}
-			// 转换 map 为 slice
-			for _, ag := range allAgents {
-				candidateAgents = append(candidateAgents, ag)
-			}
-		}
-	}
-
-	// 情况3: 在候选 Agent 中选择负载最低的（考虑负载上限）
+func (tm *TaskManager) selectLeastLoadedCandidate(candidateAgents []agent.Agent) (agent.Agent, error) {
 	var selectedAgent agent.Agent
-	minLoad := int(^uint(0) >> 1) // MaxInt
+	minLoad := int(^uint(0) >> 1)
 
 	for _, ag := range candidateAgents {
 		agentName := ag.GetName()
 		currentLoad := len(tm.agentTasks[agentName])
-
-		// 检查是否超过单个 Agent 的负载上限
 		if tm.maxTasksPerAgent > 0 && currentLoad >= tm.maxTasksPerAgent {
-			// 该 Agent 已满载，跳过
 			continue
 		}
-
 		if currentLoad < minLoad {
 			minLoad = currentLoad
 			selectedAgent = ag
@@ -337,7 +363,6 @@ func (tm *TaskManager) selectAgentForTask(task *Task) (agent.Agent, error) {
 	}
 
 	if selectedAgent == nil {
-		// 如果有负载限制，可能所有 Agent 都满载了
 		if tm.maxTasksPerAgent > 0 {
 			return nil, apperr.Conflict(fmt.Sprintf("all agents are at max capacity (%d tasks each)", tm.maxTasksPerAgent)).WithCode("agent_capacity_exhausted")
 		}

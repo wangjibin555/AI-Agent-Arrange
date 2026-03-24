@@ -88,27 +88,12 @@ func (e *StreamingEngine) saveStreamingCheckpoint(
 	buffer *StreamBuffer,
 	explicitOutput map[string]interface{},
 ) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if execution.Checkpoints == nil {
-		execution.Checkpoints = make(map[string]*StreamCheckpoint)
-	}
-
 	output := explicitOutput
 	if output == nil {
 		output = e.collectPartialStreamResult(buffer)
 	}
 
-	execution.Checkpoints[stepID] = &StreamCheckpoint{
-		StepID:      stepID,
-		ChunkIndex:  buffer.TotalChunks() - 1,
-		TotalChunks: buffer.TotalChunks(),
-		TotalTokens: buffer.TotalTokens(),
-		Output:      copyMap(output),
-		Timestamp:   time.Now(),
-	}
-	_ = e.persistExecutionSnapshot(context.Background(), execution)
+	_ = e.executionState().SaveCheckpoint(execution, stepID, newStreamingCheckpoint(stepID, buffer, output))
 }
 
 func (e *StreamingEngine) restoreFromCheckpoint(
@@ -160,9 +145,9 @@ func (e *StreamingEngine) executeCompensation(
 		return nil
 	}
 
-	ag, err := e.agentRegistry.Get(step.AgentName)
+	ag, err := e.resolveStepAgent(step)
 	if err != nil {
-		return apperr.NotFoundf("compensation agent not found: %s", step.AgentName).WithCode("workflow_compensation_agent_not_found")
+		return apperr.NotFound("compensation agent resolution failed").WithCode("workflow_compensation_agent_not_found").WithCause(err)
 	}
 
 	params := copyMap(step.CompensationParams)
@@ -196,7 +181,7 @@ func (e *StreamingEngine) executeCompensation(
 
 func (e *StreamingEngine) rollbackStreamingWorkflow(
 	ctx context.Context,
-	workflow *Workflow,
+	workflow *CompiledWorkflow,
 	execution *WorkflowExecution,
 	completedSteps map[string]bool,
 ) {
@@ -204,7 +189,7 @@ func (e *StreamingEngine) rollbackStreamingWorkflow(
 		"Starting workflow rollback", nil)
 
 	for i := len(workflow.Steps) - 1; i >= 0; i-- {
-		step := workflow.Steps[i]
+		step := workflow.Steps[i].Runtime
 		if !completedSteps[step.ID] {
 			continue
 		}
@@ -256,7 +241,7 @@ func (e *StreamingEngine) ResumeExecution(
 		StartedAt: time.Now(),
 	}
 
-	for k, v := range source.Context.Variables {
+	for k, v := range source.Context.SnapshotVariables() {
 		execution.Context.SetVariable(k, v)
 	}
 	for k, v := range variables {
@@ -291,7 +276,7 @@ func (e *StreamingEngine) ResumeExecution(
 	}
 
 	resumedWorkflow := cloneWorkflowForResume(workflow, restoredSet)
-	resumedDAG, err := NewDAG(resumedWorkflow.Steps)
+	compiledWorkflow, err := CompileWorkflow(resumedWorkflow)
 	if err != nil {
 		return nil, fmt.Errorf("invalid resumed workflow: %w", err)
 	}
@@ -300,18 +285,17 @@ func (e *StreamingEngine) ResumeExecution(
 	e.executionCache[execution.ID] = execution
 	e.mu.Unlock()
 
-	if err := e.persistExecutionSnapshot(ctx, execution); err != nil {
-		return nil, fmt.Errorf("failed to save resumed execution: %w", err)
-	}
+	e.emitRuntimeEvent(ctx, RuntimeEvent{
+		Type:            "workflow_resumed",
+		Status:          string(WorkflowStatusRunning),
+		Message:         fmt.Sprintf("Workflow resumed from execution %s", sourceExecutionID),
+		Data:            map[string]interface{}{"source_execution_id": sourceExecutionID},
+		Execution:       execution,
+		PersistSnapshot: true,
+		RecoveryStatus:  string(RecoveryStatusResumed),
+	})
 
-	e.publishEvent(execution.ID, "workflow_resumed", string(WorkflowStatusRunning),
-		fmt.Sprintf("Workflow resumed from execution %s", sourceExecutionID),
-		map[string]interface{}{
-			"source_execution_id": sourceExecutionID,
-			"recovery_status":     string(RecoveryStatusResumed),
-		})
-
-	go e.executeWorkflowStreamingWithState(ctx, resumedWorkflow, resumedDAG, execution, make(map[string]bool), make(map[string]bool))
+	go e.executeWorkflowStreamingWithState(ctx, compiledWorkflow, execution, make(map[string]bool), make(map[string]bool))
 	return execution, nil
 }
 
@@ -378,16 +362,14 @@ func (e *StreamingEngine) markExecutionInterrupted(ctx context.Context, executio
 	now := time.Now()
 	execution.CompletedAt = &now
 
-	if err := e.persistExecutionSnapshot(ctx, execution); err != nil {
-		return err
-	}
-
-	e.publishEvent(execution.ID, "workflow_interrupted", string(execution.Status), message, map[string]interface{}{
-		"recovery_status": string(execution.RecoveryStatus),
+	e.emitRuntimeEvent(ctx, RuntimeEvent{
+		Type:            "workflow_interrupted",
+		Status:          string(execution.Status),
+		Message:         message,
+		Execution:       execution,
+		PersistSnapshot: true,
+		RecoveryStatus:  string(execution.RecoveryStatus),
 	})
-	if e.metrics != nil {
-		e.metrics.ObserveRecovery(execution.WorkflowID, string(execution.RecoveryStatus))
-	}
 	return nil
 }
 
@@ -403,17 +385,15 @@ func (e *StreamingEngine) markExecutionSuperseded(ctx context.Context, execution
 	now := time.Now()
 	execution.CompletedAt = &now
 
-	if err := e.persistExecutionSnapshot(ctx, execution); err != nil {
-		return err
-	}
-
-	e.publishEvent(execution.ID, "workflow_superseded", string(execution.Status), message, map[string]interface{}{
-		"recovery_status":            string(execution.RecoveryStatus),
-		"superseded_by_execution_id": execution.SupersededByExecutionID,
+	e.emitRuntimeEvent(ctx, RuntimeEvent{
+		Type:                    "workflow_superseded",
+		Status:                  string(execution.Status),
+		Message:                 message,
+		Execution:               execution,
+		PersistSnapshot:         true,
+		RecoveryStatus:          string(execution.RecoveryStatus),
+		SupersededByExecutionID: execution.SupersededByExecutionID,
 	})
-	if e.metrics != nil {
-		e.metrics.ObserveRecovery(execution.WorkflowID, string(execution.RecoveryStatus))
-	}
 	return nil
 }
 

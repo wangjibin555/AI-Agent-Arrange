@@ -47,6 +47,23 @@ func (e *EchoAgent) GetCapabilities() []string {
 	return e.capabilities
 }
 
+func (e *EchoAgent) GetActionContract(action string) (*ActionContract, bool) {
+	switch action {
+	case "echo":
+		return &ActionContract{OutputRequired: []string{"action", "echoed_parameters", "message"}}, true
+	case "ping":
+		return &ActionContract{OutputRequired: []string{"action", "response", "timestamp"}}, true
+	case "sleep":
+		return &ActionContract{InputRequired: []string{"duration"}, OutputRequired: []string{"action", "slept_seconds", "message"}}, true
+	case "error":
+		return &ActionContract{OutputRequired: []string{"action", "message"}}, true
+	case "process":
+		return &ActionContract{InputRequired: []string{"text"}, OutputRequired: []string{"action", "original_text", "processed_text", "message"}}, true
+	default:
+		return nil, false
+	}
+}
+
 // Init initializes the agent with configuration
 func (e *EchoAgent) Init(config *Config) error {
 	e.config = config

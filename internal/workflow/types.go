@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"encoding/json"
 	"sync"
 	"time"
 )
@@ -46,7 +47,9 @@ type Step struct {
 	ID                 string                 `json:"id" yaml:"id"`                                                       // 步骤唯一标识符
 	Name               string                 `json:"name,omitempty" yaml:"name,omitempty"`                               // 可读的步骤名称
 	AgentName          string                 `json:"agent" yaml:"agent"`                                                 // 执行此步骤的Agent名称
+	Capability         string                 `json:"capability,omitempty" yaml:"capability,omitempty"`                   // 按能力选择执行Agent
 	Action             string                 `json:"action" yaml:"action"`                                               // 要执行的动作
+	Inputs             map[string]interface{} `json:"inputs,omitempty" yaml:"inputs,omitempty"`                           // 显式输入映射，优先于 params 模板主路径
 	Parameters         map[string]interface{} `json:"params,omitempty" yaml:"params,omitempty"`                           // 步骤参数（可使用模板）
 	DependsOn          []string               `json:"depends_on,omitempty" yaml:"depends_on,omitempty"`                   // 此步骤依赖的步骤ID列表
 	Condition          *Condition             `json:"condition,omitempty" yaml:"condition,omitempty"`                     // 条件执行规则
@@ -57,9 +60,15 @@ type Step struct {
 	OnFailure          *StepFailurePolicy     `json:"on_failure,omitempty" yaml:"on_failure,omitempty"`                   // 失败时的处理策略
 	ContinueOn         *ContinuePolicy        `json:"continue_on,omitempty" yaml:"continue_on,omitempty"`                 // 在错误时是否继续执行
 	OutputAlias        string                 `json:"output_as,omitempty" yaml:"output_as,omitempty"`                     // 步骤输出在上下文中的别名
+	InputSchema        *StepSchema            `json:"input_schema,omitempty" yaml:"input_schema,omitempty"`               // 显式输入契约（弱 schema）
+	OutputSchema       *StepSchema            `json:"output_schema,omitempty" yaml:"output_schema,omitempty"`             // 输出契约（弱 schema）
 	Streaming          *StreamingConfig       `json:"streaming,omitempty" yaml:"streaming,omitempty"`                     // 流式执行配置
 	CompensationAction string                 `json:"compensation_action,omitempty" yaml:"compensation_action,omitempty"` // 回滚时补偿动作
 	CompensationParams map[string]interface{} `json:"compensation_params,omitempty" yaml:"compensation_params,omitempty"` // 补偿动作参数
+}
+
+type StepSchema struct {
+	Required []string `json:"required,omitempty" yaml:"required,omitempty"`
 }
 
 // Condition 表示条件执行规则
@@ -167,7 +176,32 @@ type WorkflowExecution struct {
 	Error                   string                       `json:"error,omitempty"`
 	StartedAt               time.Time                    `json:"started_at"`
 	CompletedAt             *time.Time                   `json:"completed_at,omitempty"`
-	notifier                *sync.Cond                   `json:"-"`
+	notifier                *executionNotifier           `json:"-"`
+}
+
+type executionNotifier struct {
+	mu sync.Mutex
+	ch chan struct{}
+}
+
+func newExecutionNotifier() *executionNotifier {
+	return &executionNotifier{
+		ch: make(chan struct{}),
+	}
+}
+
+func (n *executionNotifier) WaitChan() <-chan struct{} {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.ch
+}
+
+func (n *executionNotifier) Notify() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	close(n.ch)
+	n.ch = make(chan struct{})
 }
 
 // StepExecution represents the execution status of a single step
@@ -192,6 +226,20 @@ type StreamCheckpoint struct {
 	Timestamp   time.Time              `json:"timestamp"`
 }
 
+func (c *StreamCheckpoint) Clone() *StreamCheckpoint {
+	if c == nil {
+		return nil
+	}
+	return &StreamCheckpoint{
+		StepID:      c.StepID,
+		ChunkIndex:  c.ChunkIndex,
+		TotalChunks: c.TotalChunks,
+		TotalTokens: c.TotalTokens,
+		Output:      copyMap(c.Output),
+		Timestamp:   c.Timestamp,
+	}
+}
+
 type ExecutionResumeState struct {
 	SourceExecutionID string   `json:"source_execution_id,omitempty"`
 	RestoredSteps     []string `json:"restored_steps,omitempty"`
@@ -199,47 +247,154 @@ type ExecutionResumeState struct {
 
 // ExecutionContext holds runtime data for workflow execution
 type ExecutionContext struct {
-	Variables map[string]interface{}            `json:"variables"` // Global variables
-	Outputs   map[string]map[string]interface{} `json:"outputs"`   // stepID -> output data
+	mu        sync.RWMutex
+	variables map[string]interface{}
+	outputs   map[string]map[string]interface{}
 }
 
 // NewExecutionContext creates a new execution context
 func NewExecutionContext(variables map[string]interface{}) *ExecutionContext {
-	if variables == nil {
-		variables = make(map[string]interface{})
+	clonedVariables := copyMap(variables)
+	if clonedVariables == nil {
+		clonedVariables = make(map[string]interface{})
 	}
 	return &ExecutionContext{
-		Variables: variables,
-		Outputs:   make(map[string]map[string]interface{}),
+		variables: clonedVariables,
+		outputs:   make(map[string]map[string]interface{}),
 	}
 }
 
 // SetStepOutput stores the output of a step
 func (c *ExecutionContext) SetStepOutput(stepID string, output map[string]interface{}) {
-	c.Outputs[stepID] = output
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.outputs[stepID] = copyMap(output)
 }
 
 // GetStepOutput retrieves the output of a step
 func (c *ExecutionContext) GetStepOutput(stepID string) (map[string]interface{}, bool) {
-	output, exists := c.Outputs[stepID]
-	return output, exists
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	output, exists := c.outputs[stepID]
+	if !exists || output == nil {
+		return nil, false
+	}
+	return copyMap(output), true
+}
+
+// MergeStepOutput merges partial output into one step output and returns the merged snapshot.
+func (c *ExecutionContext) MergeStepOutput(stepID string, output map[string]interface{}) map[string]interface{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	merged := c.outputs[stepID]
+	if merged == nil {
+		merged = make(map[string]interface{}, len(output))
+		c.outputs[stepID] = merged
+	}
+	for key, value := range output {
+		merged[key] = value
+	}
+	return copyMap(merged)
 }
 
 // SetVariable sets a global variable
 func (c *ExecutionContext) SetVariable(key string, value interface{}) {
-	c.Variables[key] = value
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.variables == nil {
+		c.variables = make(map[string]interface{})
+	}
+	c.variables[key] = value
 }
 
 // GetVariable retrieves a global variable
 func (c *ExecutionContext) GetVariable(key string) (interface{}, bool) {
-	value, exists := c.Variables[key]
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	value, exists := c.variables[key]
 	return value, exists
 }
 
 func (c *ExecutionContext) RemoveStepOutput(stepID string) {
-	delete(c.Outputs, stepID)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.outputs, stepID)
 }
 
 func (c *ExecutionContext) DeleteVariable(key string) {
-	delete(c.Variables, key)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.variables, key)
+}
+
+func (c *ExecutionContext) SnapshotVariables() map[string]interface{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	variables := copyMap(c.variables)
+	if variables == nil {
+		return make(map[string]interface{})
+	}
+	return variables
+}
+
+func (c *ExecutionContext) SnapshotOutputs() map[string]map[string]interface{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	outputs := make(map[string]map[string]interface{}, len(c.outputs))
+	for stepID, output := range c.outputs {
+		outputs[stepID] = copyMap(output)
+	}
+	return outputs
+}
+
+func (c *ExecutionContext) Clone() *ExecutionContext {
+	if c == nil {
+		return NewExecutionContext(nil)
+	}
+
+	return &ExecutionContext{
+		variables: c.SnapshotVariables(),
+		outputs:   c.SnapshotOutputs(),
+	}
+}
+
+func (c *ExecutionContext) MarshalJSON() ([]byte, error) {
+	if c == nil {
+		return []byte("null"), nil
+	}
+
+	payload := struct {
+		Variables map[string]interface{}            `json:"variables"`
+		Outputs   map[string]map[string]interface{} `json:"outputs"`
+	}{
+		Variables: c.SnapshotVariables(),
+		Outputs:   c.SnapshotOutputs(),
+	}
+	return json.Marshal(payload)
+}
+
+func (c *ExecutionContext) UnmarshalJSON(data []byte) error {
+	var payload struct {
+		Variables map[string]interface{}            `json:"variables"`
+		Outputs   map[string]map[string]interface{} `json:"outputs"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.variables = copyMap(payload.Variables)
+	c.outputs = make(map[string]map[string]interface{}, len(payload.Outputs))
+	for stepID, output := range payload.Outputs {
+		c.outputs[stepID] = copyMap(output)
+	}
+	if c.variables == nil {
+		c.variables = make(map[string]interface{})
+	}
+	return nil
 }

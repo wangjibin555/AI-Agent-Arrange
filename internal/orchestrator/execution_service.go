@@ -390,8 +390,8 @@ func (s *ExecutionService) getWorkflowExecution(ctx context.Context, executionID
 		summary["superseded_by_execution_id"] = execution.SupersededByExecutionID
 	}
 	if execution.Context != nil {
-		summary["variables"] = execution.Context.Variables
-		summary["outputs"] = execution.Context.Outputs
+		summary["variables"] = execution.Context.SnapshotVariables()
+		summary["outputs"] = execution.Context.SnapshotOutputs()
 	}
 
 	startedAt := execution.StartedAt

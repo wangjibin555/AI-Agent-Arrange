@@ -2,7 +2,9 @@ package workflow
 
 import (
 	"fmt"
+	"math"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -13,6 +15,7 @@ type TemplateEngine struct {
 }
 
 var templateExprRE = regexp.MustCompile(`\{\{([^}]+)\}\}`)
+var conditionOperatorRE = regexp.MustCompile(`^(.*?)\s*(==|!=|>=|<=|>|<)\s*(.*?)$`)
 
 // NewTemplateEngine creates a new template engine
 func NewTemplateEngine(ctx *ExecutionContext) *TemplateEngine {
@@ -189,10 +192,30 @@ func (te *TemplateEngine) valueToString(value interface{}) string {
 	switch v := value.(type) {
 	case string:
 		return v
-	case int, int32, int64:
-		return fmt.Sprintf("%d", v)
-	case float32, float64:
-		return strconv.FormatFloat(v.(float64), 'f', -1, 64)
+	case int:
+		return strconv.FormatInt(int64(v), 10)
+	case int8:
+		return strconv.FormatInt(int64(v), 10)
+	case int16:
+		return strconv.FormatInt(int64(v), 10)
+	case int32:
+		return strconv.FormatInt(int64(v), 10)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case uint:
+		return strconv.FormatUint(uint64(v), 10)
+	case uint8:
+		return strconv.FormatUint(uint64(v), 10)
+	case uint16:
+		return strconv.FormatUint(uint64(v), 10)
+	case uint32:
+		return strconv.FormatUint(uint64(v), 10)
+	case uint64:
+		return strconv.FormatUint(v, 10)
+	case float32:
+		return strconv.FormatFloat(float64(v), 'f', -1, 32)
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
 	case bool:
 		return strconv.FormatBool(v)
 	case nil:
@@ -209,70 +232,219 @@ func (te *TemplateEngine) valueToString(value interface{}) string {
 //   - {{variable}} == "success"
 //   - {{step1.result.enabled}} == true
 func (te *TemplateEngine) EvaluateCondition(expression string) (bool, error) {
-	// Simple implementation: render template and evaluate
-	// In production, you'd want a proper expression evaluator
+	expr := strings.TrimSpace(expression)
+	if expr == "" {
+		return false, fmt.Errorf("empty condition expression")
+	}
 
-	rendered, err := te.Render(expression)
+	if matches := conditionOperatorRE.FindStringSubmatch(expr); len(matches) == 4 {
+		left, err := te.resolveConditionOperand(matches[1])
+		if err != nil {
+			return false, err
+		}
+		right, err := te.resolveConditionOperand(matches[3])
+		if err != nil {
+			return false, err
+		}
+		return compareConditionValues(left, matches[2], right)
+	}
+
+	value, err := te.resolveConditionOperand(expr)
 	if err != nil {
 		return false, err
 	}
-
-	// Check for comparison operators
-	operators := []string{"==", "!=", ">=", "<=", ">", "<"}
-	for _, op := range operators {
-		if strings.Contains(rendered, op) {
-			parts := strings.SplitN(rendered, op, 2)
-			if len(parts) != 2 {
-				continue
-			}
-
-			left := strings.TrimSpace(parts[0])
-			right := strings.TrimSpace(parts[1])
-
-			return te.compare(left, op, right)
-		}
-	}
-
-	// If no operator, treat as boolean
-	return te.toBoolean(rendered), nil
+	return te.toBoolean(value), nil
 }
 
-// compare compares two values based on operator
-func (te *TemplateEngine) compare(left, operator, right string) (bool, error) {
-	// Try numeric comparison first
-	leftNum, leftErr := strconv.ParseFloat(left, 64)
-	rightNum, rightErr := strconv.ParseFloat(right, 64)
+func (te *TemplateEngine) resolveConditionOperand(raw string) (interface{}, error) {
+	operand := strings.TrimSpace(raw)
+	if operand == "" {
+		return "", nil
+	}
 
-	if leftErr == nil && rightErr == nil {
-		switch operator {
-		case "==":
-			return leftNum == rightNum, nil
-		case "!=":
-			return leftNum != rightNum, nil
-		case ">":
-			return leftNum > rightNum, nil
-		case ">=":
-			return leftNum >= rightNum, nil
-		case "<":
-			return leftNum < rightNum, nil
-		case "<=":
-			return leftNum <= rightNum, nil
+	if value, ok, err := parseConditionLiteral(operand); ok || err != nil {
+		return value, err
+	}
+
+	if strings.HasPrefix(operand, "{{") && strings.HasSuffix(operand, "}}") {
+		return te.ResolveValue(operand)
+	}
+
+	return te.evaluateExpression(operand)
+}
+
+func parseConditionLiteral(raw string) (interface{}, bool, error) {
+	if len(raw) >= 2 {
+		if (raw[0] == '"' && raw[len(raw)-1] == '"') || (raw[0] == '\'' && raw[len(raw)-1] == '\'') {
+			return raw[1 : len(raw)-1], true, nil
 		}
 	}
 
-	// String comparison
+	switch strings.ToLower(raw) {
+	case "true":
+		return true, true, nil
+	case "false":
+		return false, true, nil
+	case "null", "nil":
+		return nil, true, nil
+	}
+
+	if num, err := strconv.ParseFloat(raw, 64); err == nil {
+		return num, true, nil
+	}
+
+	return nil, false, nil
+}
+
+func compareConditionValues(left interface{}, operator string, right interface{}) (bool, error) {
+	if leftNum, ok := toComparableNumber(left); ok {
+		if rightNum, ok := toComparableNumber(right); ok {
+			return compareNumeric(leftNum, operator, rightNum)
+		}
+	}
+
+	if leftBool, ok := left.(bool); ok {
+		if rightBool, ok := right.(bool); ok {
+			switch operator {
+			case "==":
+				return leftBool == rightBool, nil
+			case "!=":
+				return leftBool != rightBool, nil
+			default:
+				return false, fmt.Errorf("operator %s not supported for booleans", operator)
+			}
+		}
+	}
+
+	if left == nil || right == nil {
+		switch operator {
+		case "==":
+			return left == right, nil
+		case "!=":
+			return left != right, nil
+		default:
+			return false, fmt.Errorf("operator %s not supported for nil values", operator)
+		}
+	}
+
+	leftStr := stringifyComparableValue(left)
+	rightStr := stringifyComparableValue(right)
+	switch operator {
+	case "==":
+		return leftStr == rightStr, nil
+	case "!=":
+		return leftStr != rightStr, nil
+	case ">":
+		return leftStr > rightStr, nil
+	case ">=":
+		return leftStr >= rightStr, nil
+	case "<":
+		return leftStr < rightStr, nil
+	case "<=":
+		return leftStr <= rightStr, nil
+	default:
+		return false, fmt.Errorf("unsupported operator: %s", operator)
+	}
+}
+
+func compareNumeric(left float64, operator string, right float64) (bool, error) {
 	switch operator {
 	case "==":
 		return left == right, nil
 	case "!=":
 		return left != right, nil
+	case ">":
+		return left > right, nil
+	case ">=":
+		return left >= right, nil
+	case "<":
+		return left < right, nil
+	case "<=":
+		return left <= right, nil
 	default:
-		return false, fmt.Errorf("operator %s not supported for strings", operator)
+		return false, fmt.Errorf("unsupported operator: %s", operator)
 	}
 }
 
-// toBoolean converts a string to boolean
-func (te *TemplateEngine) toBoolean(s string) bool {
-	s = strings.TrimSpace(strings.ToLower(s))
-	return s == "true" || s == "1" || s == "yes" || s == "on"
+func toComparableNumber(value interface{}) (float64, bool) {
+	switch v := value.(type) {
+	case int:
+		return float64(v), true
+	case int8:
+		return float64(v), true
+	case int16:
+		return float64(v), true
+	case int32:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case uint:
+		return float64(v), true
+	case uint8:
+		return float64(v), true
+	case uint16:
+		return float64(v), true
+	case uint32:
+		return float64(v), true
+	case uint64:
+		if v > math.MaxInt64 {
+			return 0, false
+		}
+		return float64(v), true
+	case float32:
+		return float64(v), true
+	case float64:
+		return v, true
+	default:
+		return 0, false
+	}
+}
+
+func stringifyComparableValue(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case nil:
+		return ""
+	case map[string]interface{}:
+		return formatMapValue(v)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+func formatMapValue(value map[string]interface{}) string {
+	if len(value) == 0 {
+		return "{}"
+	}
+
+	keys := make([]string, 0, len(value))
+	for key := range value {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s:%v", key, value[key]))
+	}
+	return "{" + strings.Join(parts, ",") + "}"
+}
+
+// toBoolean converts a value to boolean semantics for conditions.
+func (te *TemplateEngine) toBoolean(value interface{}) bool {
+	switch v := value.(type) {
+	case bool:
+		return v
+	case string:
+		s := strings.TrimSpace(strings.ToLower(v))
+		return s == "true" || s == "1" || s == "yes" || s == "on"
+	case nil:
+		return false
+	default:
+		if num, ok := toComparableNumber(v); ok {
+			return num != 0
+		}
+		return fmt.Sprintf("%v", v) != ""
+	}
 }

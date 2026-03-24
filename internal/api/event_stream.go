@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/monitor"
@@ -31,7 +32,29 @@ type EventChannel struct {
 	ExecutionID string
 	ClientID    string
 	Channel     chan ExecutionEvent
-	LastActive  time.Time
+	lastActive  atomic.Int64
+}
+
+func newEventChannel(executionID string, clientID string) *EventChannel {
+	channel := &EventChannel{
+		ExecutionID: executionID,
+		ClientID:    clientID,
+		Channel:     make(chan ExecutionEvent, 10), // buffered channel
+	}
+	channel.touch(time.Now())
+	return channel
+}
+
+func (c *EventChannel) touch(now time.Time) {
+	c.lastActive.Store(now.UnixNano())
+}
+
+func (c *EventChannel) lastActiveTime() time.Time {
+	lastActive := c.lastActive.Load()
+	if lastActive == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, lastActive)
 }
 
 // EventStreamManager manages SSE connections and event distribution
@@ -62,12 +85,7 @@ func (m *EventStreamManager) Subscribe(executionID string, clientID string, exec
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	channel := &EventChannel{
-		ExecutionID: executionID,
-		ClientID:    clientID,
-		Channel:     make(chan ExecutionEvent, 10), // buffered channel
-		LastActive:  time.Now(),
-	}
+	channel := newEventChannel(executionID, clientID)
 
 	m.clients[executionID] = append(m.clients[executionID], channel)
 	if m.metrics != nil {
@@ -115,9 +133,11 @@ func (m *EventStreamManager) Unsubscribe(executionID string, clientID string, ex
 // Publish publishes an event to all subscribers of an execution.
 func (m *EventStreamManager) Publish(event ExecutionEvent) {
 	start := time.Now()
+	now := start
 	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	clients := m.clients[event.ExecutionID]
-	m.mu.RUnlock()
 
 	if len(clients) == 0 {
 		return // no subscribers
@@ -132,7 +152,7 @@ func (m *EventStreamManager) Publish(event ExecutionEvent) {
 	for _, client := range clients {
 		select {
 		case client.Channel <- event:
-			client.LastActive = time.Now()
+			client.touch(now)
 			if m.metrics != nil {
 				m.metrics.ObserveEventDelivered(event.ExecutionType, event.Type, time.Since(start))
 			}
@@ -163,13 +183,14 @@ func (m *EventStreamManager) cleanupInactiveClients() {
 
 	for range ticker.C {
 		m.mu.Lock()
+		now := time.Now()
 
 		for executionID, clients := range m.clients {
 			activeClients := make([]*EventChannel, 0, len(clients))
 
 			for _, client := range clients {
 				// Remove clients inactive for more than 5 minutes
-				if time.Since(client.LastActive) < 5*time.Minute {
+				if now.Sub(client.lastActiveTime()) < 5*time.Minute {
 					activeClients = append(activeClients, client)
 				} else {
 					close(client.Channel)
