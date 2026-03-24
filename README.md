@@ -22,6 +22,54 @@
 - workflow recovery 状态字段：`recovery_status`
 - workflow recovery handoff 字段：`superseded_by_execution_id`
 - 最小端到端 demo：task / workflow / execution / SSE
+- 轻量级前端工作台：智能体创建页 + 工作流模版页 + 拖拽编排台
+
+### 当前可用页面
+
+- 主控制台：`web/public/index.html`
+  - `智能体创建`：对应单任务 / 单智能体创建
+  - `工作流模版`：对应自然语言工作流模版式创建
+  - `执行跟踪`：统一查看 execution / steps / SSE / 时间线
+  - `智能体库`：查看当前服务已注册的 agents 和 capabilities
+- 拖拽编排台：`web/public/workflow_builder.html`
+  - 参考 Coze 风格重做了排版层级
+  - 支持输入节点、普通节点、连线依赖、节点配置、流式输出、节点级诊断
+
+### 当前默认策略
+
+为了优先保证链路稳定，而不是追求激进的低延迟触发，当前默认规则如下：
+
+- 输入节点作为 `{{user_input}}` 来源，不写入 `depends_on`
+- 新增节点会自动尝试接入当前主链，降低编排操作成本
+- 下游节点默认 `streaming.wait_for = "full"`，等待上游完整结果后再执行
+- Prompt 默认只注入上游 `result.text`，不再自动拼接整个 `result` 对象
+- workflow SSE 只会在真正的 `workflow_completed` 后结束，不会因单个 `step_completed` 提前断流
+- 健康检查只主动探活显式声明 `health-check` 能力的 Agent，避免误伤 LLM Agent
+
+### 当前推荐使用方式
+
+- 想验证单智能体能力：先走 `智能体创建`
+- 想验证顺序链式处理：先走 `工作流模版`
+- 想验证节点编排、数据流和诊断：走 `workflow_builder.html`
+- 想确认底层状态：统一回到 `执行跟踪`
+
+### 当前验证方式
+
+已补充工作流编排 smoke 脚本：
+
+```bash
+SERVER_URL=http://127.0.0.1:8080 bash scripts/test_workflow_builder_smoke.sh
+```
+
+这个脚本会验证：
+
+- 服务健康检查
+- 创建三节点链式 workflow
+- execution SSE 可连接
+- `node_8 -> node_9 -> node_10` 全部完成
+- workflow 最终正常完成
+
+如果你只想快速验证当前编排主链是否可用，这个脚本比手点页面更稳定。
 
 ## Agent 能力定位
 

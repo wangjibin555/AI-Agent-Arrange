@@ -201,4 +201,29 @@ result := tool.Execute(map[string]interface{}{
 - ✅ 灵活配置：不改代码就能增加 Agent
 - ✅ 易于扩展：新增功能只需修改 YAML
 
-你现在理解这三个配置文件的作用了吗？想深入了解哪部分的实现？
+---
+🧭 当前阶段补充说明
+
+当前项目除了配置层和执行层，也已经有一套可用的前端工作台：
+
+- `web/public/index.html`
+  - 面向统一 execution 的主控制台
+  - 包含智能体创建、工作流模版、执行跟踪、智能体库
+- `web/public/workflow_builder.html`
+  - 面向拖拽式 workflow 编排
+  - 包含输入节点、普通节点、连线关系、节点配置、节点诊断
+
+当前前端默认策略以稳定执行为先：
+
+- 下游节点默认等待上游完整结果（`wait_for = "full"`）
+- 默认只消费上游文本结果，不自动拼接完整结果对象
+- workflow SSE 只在整个 workflow 完成后结束
+- 健康检查不会再把 LLM Agent 当作 `ping` 型 agent 误判为故障
+
+如果要验证这套前端编排主链，可直接运行：
+
+```bash
+SERVER_URL=http://127.0.0.1:8080 bash scripts/test_workflow_builder_smoke.sh
+```
+
+这个脚本适合做阶段性回归，而不是人工逐页点击验证。

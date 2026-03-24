@@ -117,6 +117,53 @@ SERVER_URL=http://127.0.0.1:8080 ./scripts/demo_unified_execution.sh
 RECOVERY_EXECUTION_ID=<execution-id> ./scripts/demo_unified_execution.sh
 ```
 
+## 🖥️ 前端阶段性说明
+
+前端已经不是单纯的 demo 页面，而是两类入口并存：
+
+- `web/public/index.html`
+  - `智能体创建`：单任务 / 单智能体创建
+  - `工作流模版`：自然语言驱动的工作流模版创建
+  - `执行跟踪`：统一查看 execution / steps / SSE / timeline
+  - `智能体库`：查看当前已注册的 agents 与 capabilities
+- `web/public/workflow_builder.html`
+  - 拖拽式编排台
+  - 输入节点 + 普通节点 + 连线依赖
+  - 节点配置、流式输出、节点结果、数据流诊断
+
+### 当前前端默认规则
+
+为了保证链路稳定，当前默认策略是：
+
+- 输入节点通过 `{{user_input}}` 进入 workflow，不作为真实 step 写入依赖
+- 新增节点会优先自动接入当前主链
+- 有上游依赖的节点默认 `wait_for = "full"`，等待上游完整结果
+- 默认只注入上游 `result.text`，不自动拼接整个 `result`
+- workflow SSE 只在真正的 workflow 完成后关闭
+
+### 推荐联调顺序
+
+1. 打开主控制台，先检查服务状态
+2. 进入 `智能体库`，确认当前已注册的 agents
+3. 进入 `工作流模版` 或 `workflow_builder.html`
+4. 创建一次多节点 workflow
+5. 回到 `执行跟踪` 看 execution / steps / SSE 是否一致
+
+### 推荐 smoke 检查
+
+如果你想快速确认“编排页主链路是否真的正常”，直接运行：
+
+```bash
+SERVER_URL=http://127.0.0.1:8080 bash scripts/test_workflow_builder_smoke.sh
+```
+
+它会验证：
+
+- 服务健康
+- 三节点链式 workflow 创建成功
+- 节点 `node_8 -> node_9 -> node_10` 全部完成
+- execution SSE 正常到达
+
 ## 🌐 推荐 API 入口
 
 ### 创建入口
