@@ -1,0 +1,187 @@
+{
+  "actionSuggestions": [
+    "summarize",
+    "analyze",
+    "translate",
+    "generate",
+    "qa",
+    "chat",
+    "reason",
+    "plan",
+    "research",
+    "search",
+    "process"
+  ],
+  "nodeTemplates": {
+    "summarize": {
+      "title": "总结节点",
+      "capability": "summarization",
+      "action": "summarize",
+      "agent": "deepseek-chat-agent",
+      "prompt": "请总结输入内容，并给出 3 个要点。",
+      "systemPrompt": "你是一个简洁的中文总结助手，请输出精炼结果。",
+      "enableTools": false,
+      "temperature": 0.3,
+      "maxTokens": 2000,
+      "extraParams": ""
+    },
+    "analyze": {
+      "title": "分析节点",
+      "capability": "text-analysis",
+      "action": "analyze",
+      "agent": "deepseek-chat-agent",
+      "prompt": "请分析输入内容的主题、风险点和关键结论。",
+      "systemPrompt": "你是一个严谨的中文分析助手，请输出结构清晰的分析结果。",
+      "enableTools": false,
+      "temperature": 0.3,
+      "maxTokens": 2500,
+      "extraParams": ""
+    },
+    "translate": {
+      "title": "翻译节点",
+      "capability": "translation",
+      "action": "translate",
+      "agent": "deepseek-chat-agent",
+      "prompt": "请把输入内容翻译成中文，并保持原意准确。",
+      "systemPrompt": "你是一个专业翻译助手，请给出自然流畅的中文结果。",
+      "enableTools": false,
+      "temperature": 0.2,
+      "maxTokens": 2000,
+      "extraParams": ""
+    },
+    "polish": {
+      "title": "整理输出节点",
+      "capability": "text-generation",
+      "action": "summarize",
+      "agent": "deepseek-chat-agent",
+      "prompt": "请基于输入内容，整理成适合直接展示给用户的最终输出。",
+      "systemPrompt": "你是一个中文整理助手，请把内容整理得更简洁、可读、可展示。",
+      "enableTools": false,
+      "temperature": 0.3,
+      "maxTokens": 2000,
+      "extraParams": ""
+    },
+    "custom": {
+      "title": "自定义节点",
+      "capability": "",
+      "action": "analyze",
+      "agent": "deepseek-chat-agent",
+      "prompt": "请根据输入完成指定任务，并直接输出结果。",
+      "systemPrompt": "你是一个通用 AI 助手，请严格按照要求执行。",
+      "enableTools": false,
+      "temperature": 0.3,
+      "maxTokens": 2000,
+      "extraParams": ""
+    }
+  },
+  "capabilityPresets": {
+    "question-answering": {
+      "title": "问答节点",
+      "action": "qa",
+      "prompt": "请基于输入内容直接回答问题，并给出清晰结论。",
+      "systemPrompt": "你是一个准确的问答助手，请直接回答问题。",
+      "hint": "适合知识问答、FAQ、面向用户的直接回答。",
+      "extraParamsTemplate": ""
+    },
+    "summarization": {
+      "title": "总结节点",
+      "action": "summarize",
+      "prompt": "请总结输入内容，并给出 3 个要点。",
+      "systemPrompt": "你是一个简洁的中文总结助手，请输出精炼结果。",
+      "hint": "适合摘要、要点提炼、长文本压缩。",
+      "extraParamsTemplate": ""
+    },
+    "knowledge-extraction": {
+      "title": "知识提取节点",
+      "action": "analyze",
+      "prompt": "请从输入内容中提取关键实体、概念和事实。",
+      "systemPrompt": "你是一个知识提取助手，请结构化输出关键信息。",
+      "hint": "适合抽取实体、事实、属性和结构化信息。",
+      "extraParamsTemplate": "{\n  \"output_format\": \"bullet_list\"\n}"
+    },
+    "text-generation": {
+      "title": "生成节点",
+      "action": "generate",
+      "prompt": "请基于输入内容生成更完整、可直接使用的结果。",
+      "systemPrompt": "你是一个通用文本生成助手，请输出高质量结果。",
+      "hint": "适合扩写、改写、生成说明文案。",
+      "extraParamsTemplate": ""
+    },
+    "conversation": {
+      "title": "对话节点",
+      "action": "chat",
+      "prompt": "请基于输入内容进行多轮式自然回应。",
+      "systemPrompt": "你是一个自然、清晰的对话助手。",
+      "hint": "适合连续对话、追问回应、陪伴式交互。",
+      "extraParamsTemplate": ""
+    },
+    "translation": {
+      "title": "翻译节点",
+      "action": "translate",
+      "prompt": "请把输入内容翻译成中文，并保持原意准确。",
+      "systemPrompt": "你是一个专业翻译助手，请给出自然流畅的中文结果。",
+      "hint": "适合多语言转换、术语一致化和风格调整。",
+      "extraParamsTemplate": "{\n  \"target_language\": \"zh-CN\"\n}"
+    },
+    "text-analysis": {
+      "title": "分析节点",
+      "action": "analyze",
+      "prompt": "请分析输入内容的主题、风险点和关键结论。",
+      "systemPrompt": "你是一个严谨的中文分析助手，请输出结构清晰的分析结果。",
+      "hint": "适合做主题分析、风险研判、结论归纳。",
+      "extraParamsTemplate": "{\n  \"output_format\": \"sections\"\n}"
+    },
+    "complex-reasoning": {
+      "title": "推理规划节点",
+      "action": "reason",
+      "prompt": "请基于输入内容进行分步推理，并给出可执行的结论或计划。",
+      "systemPrompt": "你是一个严谨的推理与规划助手，请输出清晰步骤和最终结论。",
+      "hint": "适合复杂规划、决策权衡、多因素推演。",
+      "extraParamsTemplate": "{\n  \"reasoning_style\": \"step_by_step\"\n}"
+    },
+    "web-search": {
+      "title": "搜索研究节点",
+      "action": "research",
+      "prompt": "请基于输入主题进行搜索研究，汇总关键信息并给出结论。",
+      "systemPrompt": "你是一个研究助手，需要优先调用可用工具获取信息。",
+      "enableTools": true,
+      "maxTokens": 3000,
+      "hint": "适合需要联网检索、搜索汇总、事实核对的任务。",
+      "extraParamsTemplate": "{\n  \"search_depth\": \"medium\"\n}"
+    },
+    "function-calling": {
+      "title": "工具调用节点",
+      "action": "analyze",
+      "prompt": "请在需要时主动调用工具完成任务，再输出最终结果。",
+      "systemPrompt": "你是一个工具协作助手，优先利用可用工具补充信息。",
+      "enableTools": true,
+      "maxTokens": 3000,
+      "hint": "适合计算、时间、天气、搜索等需要工具协作的节点。",
+      "extraParamsTemplate": "{\n  \"tool_mode\": \"auto\"\n}"
+    },
+    "code-generation": {
+      "title": "代码生成节点",
+      "action": "generate",
+      "prompt": "请基于输入需求生成可执行代码，并说明关键实现点。",
+      "systemPrompt": "你是一个专业编码助手，请输出正确、清晰的代码。",
+      "hint": "适合代码草拟、脚本生成、示例实现。",
+      "extraParamsTemplate": "{\n  \"language\": \"go\"\n}"
+    },
+    "code-review": {
+      "title": "代码审查节点",
+      "action": "analyze",
+      "prompt": "请审查输入代码，指出问题、风险和改进建议。",
+      "systemPrompt": "你是一个严谨的代码审查助手，请优先指出真实问题。",
+      "hint": "适合静态审查、风险识别、改进建议输出。",
+      "extraParamsTemplate": "{\n  \"severity\": \"all\"\n}"
+    },
+    "debugging": {
+      "title": "调试节点",
+      "action": "analyze",
+      "prompt": "请分析输入中的报错、异常或错误行为，并给出排查路径。",
+      "systemPrompt": "你是一个调试助手，请优先定位根因和修复方向。",
+      "hint": "适合报错排查、日志分析、根因定位。",
+      "extraParamsTemplate": "{\n  \"include_fix_suggestion\": true\n}"
+    }
+  }
+}

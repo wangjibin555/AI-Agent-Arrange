@@ -1,0 +1,2410 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI-Agent-Arrange 工作流编排台</title>
+  <style>
+    :root {
+      --bg: #eef3fb;
+      --panel: rgba(255, 255, 255, 0.90);
+      --line: rgba(45, 68, 102, 0.10);
+      --ink: #162033;
+      --muted: #61708b;
+      --accent: #2563eb;
+      --accent-soft: rgba(37, 99, 235, 0.10);
+      --warn: #d97706;
+      --shadow: 0 22px 56px rgba(27, 39, 79, 0.10);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "SF Pro Display", "PingFang SC", "Hiragino Sans GB", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(37, 99, 235, 0.12), transparent 28%),
+        radial-gradient(circle at top right, rgba(14, 165, 233, 0.10), transparent 24%),
+        linear-gradient(180deg, #f7faff 0%, #edf2fb 46%, #e8eef8 100%);
+    }
+
+    button,
+    input,
+    textarea,
+    select {
+      font: inherit;
+    }
+
+    button,
+    input,
+    textarea,
+    select {
+      border: 1px solid rgba(86, 64, 39, 0.16);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.9);
+      color: var(--ink);
+    }
+
+    button {
+      cursor: pointer;
+      padding: 10px 14px;
+      transition: transform 120ms ease, box-shadow 120ms ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 20px rgba(36, 27, 20, 0.08);
+    }
+
+    input,
+    textarea,
+    select {
+      width: 100%;
+      padding: 12px 14px;
+      outline: none;
+    }
+
+    textarea {
+      min-height: 110px;
+      resize: vertical;
+      line-height: 1.6;
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: 300px minmax(0, 1fr) 390px;
+      min-height: 100vh;
+      gap: 18px;
+      padding: 18px;
+    }
+
+    .sidebar,
+    .inspector,
+    .canvas-shell {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 28px;
+      box-shadow: var(--shadow);
+    }
+
+    .sidebar,
+    .inspector {
+      padding: 22px;
+      display: grid;
+      gap: 18px;
+      align-content: start;
+      max-height: calc(100vh - 36px);
+      overflow: auto;
+    }
+
+    .brand {
+      display: grid;
+      gap: 10px;
+    }
+
+    .eyebrow {
+      font-size: 12px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: 30px;
+      line-height: 1.04;
+    }
+
+    .muted {
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 14px;
+    }
+
+    .tool-grid {
+      display: grid;
+      gap: 10px;
+    }
+
+    .server-box {
+      padding: 16px;
+      border-radius: 22px;
+      border: 1px solid var(--line);
+      background: rgba(247, 250, 255, 0.84);
+      display: grid;
+      gap: 12px;
+    }
+
+    .tool-card {
+      padding: 16px;
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.80);
+      display: grid;
+      gap: 10px;
+    }
+
+    .tool-card strong {
+      font-size: 14px;
+    }
+
+    .tool-card span {
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .tool-card small {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .tool-card button {
+      justify-self: start;
+      background: var(--accent-soft);
+      color: var(--accent);
+      border-color: transparent;
+    }
+
+    .sidebar-actions,
+    .inspector-actions,
+    .canvas-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .toolbar-stack {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: flex-end;
+      align-items: center;
+    }
+
+    .canvas-stage.panning {
+      cursor: grabbing;
+    }
+
+    .primary {
+      background: var(--ink);
+      color: #f8fbff;
+      border-color: transparent;
+    }
+
+    .secondary {
+      background: rgba(255, 255, 255, 0.86);
+    }
+
+    .ghost {
+      background: transparent;
+      border-style: dashed;
+      color: var(--muted);
+    }
+
+    .canvas-shell {
+      padding: 18px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 16px;
+      min-height: 0;
+    }
+
+    .canvas-topbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      padding: 6px 10px;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(247, 250, 255, 0.92);
+      border: 1px solid var(--line);
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .canvas-stage {
+      position: relative;
+      overflow: auto;
+      cursor: default;
+      border-radius: 24px;
+      border: 1px solid var(--line);
+      background:
+        linear-gradient(rgba(97, 112, 139, 0.08) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(97, 112, 139, 0.08) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(244, 248, 255, 0.96));
+      background-size: 28px 28px, 28px 28px, auto;
+      min-height: 720px;
+    }
+
+    .canvas-viewport {
+      position: relative;
+      width: 1800px;
+      height: 1200px;
+      transform-origin: 0 0;
+    }
+
+    .edge-layer {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    .edge-path {
+      fill: none;
+      stroke: rgba(15, 118, 110, 0.7);
+      stroke-width: 3;
+      stroke-linecap: round;
+    }
+
+    .temp-edge {
+      stroke-dasharray: 8 8;
+      stroke: rgba(180, 83, 9, 0.9);
+    }
+
+    .node {
+      position: absolute;
+      width: 220px;
+      padding: 16px;
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: 0 16px 32px rgba(27, 39, 79, 0.10);
+      display: grid;
+      gap: 10px;
+      user-select: none;
+      cursor: grab;
+    }
+
+    .node.selected {
+      border-color: rgba(15, 118, 110, 0.48);
+      box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.14), 0 14px 28px rgba(15, 118, 110, 0.12);
+    }
+
+    .node.edge-target {
+      box-shadow: 0 0 0 3px rgba(180, 83, 9, 0.18), 0 14px 28px rgba(180, 83, 9, 0.12);
+      border-color: rgba(180, 83, 9, 0.4);
+    }
+
+    .node.dragging {
+      cursor: grabbing;
+      opacity: 0.94;
+    }
+
+    .node.input-node {
+      border-style: dashed;
+      border-color: rgba(15, 118, 110, 0.34);
+      background: linear-gradient(180deg, rgba(232, 251, 248, 0.96), rgba(255, 255, 255, 0.98));
+      box-shadow: 0 12px 28px rgba(15, 118, 110, 0.1);
+      cursor: default;
+    }
+
+    .node.status-running {
+      border-color: rgba(180, 83, 9, 0.48);
+      box-shadow: 0 0 0 2px rgba(180, 83, 9, 0.1), 0 14px 28px rgba(180, 83, 9, 0.14);
+    }
+
+    .node.status-streaming {
+      border-color: rgba(180, 83, 9, 0.48);
+      box-shadow: 0 0 0 2px rgba(180, 83, 9, 0.1), 0 14px 28px rgba(180, 83, 9, 0.14);
+    }
+
+    .node.status-completed {
+      border-color: rgba(15, 118, 110, 0.42);
+      box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.08), 0 14px 28px rgba(15, 118, 110, 0.12);
+    }
+
+    .node.status-failed {
+      border-color: rgba(185, 28, 28, 0.42);
+      box-shadow: 0 0 0 2px rgba(185, 28, 28, 0.08), 0 14px 28px rgba(185, 28, 28, 0.12);
+    }
+
+    .node-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: start;
+    }
+
+    .node-title {
+      display: grid;
+      gap: 4px;
+    }
+
+    .node-title strong {
+      font-size: 15px;
+      line-height: 1.3;
+    }
+
+    .node-title span {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .node-chip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .node-summary {
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--muted);
+      white-space: pre-wrap;
+      word-break: break-word;
+      min-height: 44px;
+    }
+
+    .node-flags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .node-flag {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      background: rgba(36, 27, 20, 0.08);
+      color: var(--muted);
+    }
+
+    .node-flag.good {
+      background: rgba(15, 118, 110, 0.12);
+      color: var(--accent);
+    }
+
+    .node-flag.warn {
+      background: rgba(180, 83, 9, 0.14);
+      color: var(--warn);
+    }
+
+    .node-flag.error {
+      background: rgba(185, 28, 28, 0.14);
+      color: #b91c1c;
+    }
+
+    .node-port {
+      position: absolute;
+      top: 50%;
+      width: 14px;
+      height: 14px;
+      margin-top: -7px;
+      border-radius: 999px;
+      background: var(--accent);
+      box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.18);
+      cursor: crosshair;
+    }
+
+    .node-port.in {
+      left: -7px;
+      background: #ffffff;
+      border: 3px solid var(--accent);
+      box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
+    }
+
+    .node-port.out {
+      right: -7px;
+    }
+
+    .field-group {
+      display: grid;
+      gap: 8px;
+    }
+
+    .field-group label {
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .field-group small {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .list-box {
+      display: grid;
+      gap: 8px;
+      max-height: 220px;
+      overflow: auto;
+    }
+
+    .agent-pill,
+    .edge-pill,
+    .capability-pill {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      padding: 12px 14px;
+      border-radius: 16px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.78);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .agent-pill button,
+    .edge-pill button,
+    .capability-pill button {
+      padding: 8px 10px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 0;
+    }
+
+    .json-preview {
+      min-height: 220px;
+      max-height: 360px;
+      overflow: auto;
+      padding: 14px;
+      border-radius: 20px;
+      background: #162033;
+      color: #dce7ff;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      border: 1px solid rgba(32, 25, 18, 0.5);
+    }
+
+    .help-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .stream-output {
+      display: grid;
+      gap: 12px;
+    }
+
+    .stream-box {
+      padding: 14px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.82);
+      display: grid;
+      gap: 8px;
+    }
+
+    .stream-live-text,
+    .stream-process {
+      min-height: 88px;
+      max-height: 220px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.6;
+      font-size: 13px;
+    }
+
+    .stream-process-item,
+    .node-stream-item {
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.76);
+      border: 1px solid var(--line);
+      line-height: 1.6;
+      font-size: 13px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .node-stream-list {
+      display: grid;
+      gap: 10px;
+      max-height: 320px;
+      overflow: auto;
+    }
+
+    .help-item {
+      padding: 12px 14px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.78);
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    @media (max-width: 1180px) {
+      .app {
+        grid-template-columns: 1fr;
+      }
+
+      .canvas-stage {
+        min-height: 560px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="eyebrow">AI-Agent-Arrange / Workflow Studio</div>
+        <h1>工作流工作台</h1>
+        <p class="muted">参考 Coze 的编排体验，保留现有功能与模块，只重做页面层级、信息密度和视觉节奏，让节点编排、模版选择与调试更像一个正式产品页。</p>
+      </div>
+
+      <section class="server-box">
+        <div class="field-group">
+          <label>服务地址</label>
+          <input id="serverUrl" type="text" value="http://localhost:8080">
+        </div>
+        <div class="sidebar-actions">
+          <button class="secondary" id="checkHealthBtn" type="button">检查服务</button>
+          <button class="secondary" id="loadAgentsBtn" type="button">加载 Agent</button>
+        </div>
+        <div class="help-item" id="healthStatus">当前还未检查服务状态。</div>
+      </section>
+
+      <section class="field-group">
+        <h3>输入源</h3>
+        <div class="help-item">这里是工作流的输入源。根节点会自动拿到 `{{user_input}}`，不再通过弹窗逐次填写。</div>
+        <textarea id="workflowUserInput" placeholder="请输入用户自然语言需求">请先分析这段文本，再提炼关键结论，并整理成一段适合直接展示给用户的最终输出。</textarea>
+      </section>
+
+      <div class="sidebar-actions">
+        <button class="primary" id="addNodeBtn" type="button">新建节点</button>
+        <button class="secondary" id="resetGraphBtn" type="button">恢复默认图</button>
+        <button class="ghost" id="backIndexBtn" type="button">返回主控制台</button>
+      </div>
+
+      <section class="tool-grid">
+        <div class="tool-card">
+          <strong>总结节点</strong>
+          <span>适合把输入或上一步结果整理成摘要。</span>
+          <button type="button" data-template="summarize">插入</button>
+        </div>
+        <div class="tool-card">
+          <strong>分析节点</strong>
+          <span>适合输出主题、风险点、结论等结构化分析。</span>
+          <button type="button" data-template="analyze">插入</button>
+        </div>
+        <div class="tool-card">
+          <strong>翻译节点</strong>
+          <span>适合做语言转换或中英文改写。</span>
+          <button type="button" data-template="translate">插入</button>
+        </div>
+        <div class="tool-card">
+          <strong>整理输出节点</strong>
+          <span>适合作为最后一步，把上游结果整理成可展示文本。</span>
+          <button type="button" data-template="polish">插入</button>
+        </div>
+        <div class="tool-card">
+          <strong>自定义节点</strong>
+          <span>不受预置模板限制，可自由填写 agent、action、prompt 和高级参数。</span>
+          <button type="button" data-template="custom">插入</button>
+        </div>
+      </section>
+
+      <section class="field-group">
+        <h3>工作流模版库</h3>
+        <div class="list-box" id="capabilityLibrary">
+          <div class="help-item">点击“加载 Agent”后，这里会根据当前服务已注册的 Agent 能力动态生成可插入节点。</div>
+        </div>
+      </section>
+
+      <section class="help-list">
+        <div class="help-item">拖动节点卡片可以改变画布位置。</div>
+        <div class="help-item">从节点右侧圆点拖到另一个节点左侧圆点，可以创建依赖连线。</div>
+        <div class="help-item">选中节点后，右侧面板可以直接修改 agent、action、prompt、system prompt，以及工具开关、温度、额外参数。</div>
+        <div class="help-item">下方会实时生成 workflow JSON，可复制回主控制台继续执行，也可以直接在这里执行。</div>
+      </section>
+
+      <section class="field-group">
+        <h3>智能体库</h3>
+        <div class="list-box" id="agentList">
+          <div class="help-item">点击“加载 Agent”后，这里会显示当前服务已注册的 Agent。</div>
+        </div>
+      </section>
+    </aside>
+
+    <main class="canvas-shell">
+      <div class="canvas-topbar">
+        <div>
+          <h2>工作流画布</h2>
+          <p class="muted">中间区域保持 Coze 风格的大画布体验，聚焦节点连接、执行关系和轻量 DAG 预览。当前仍以顺序与显式依赖建模为主，不改你现有功能语义。</p>
+        </div>
+        <div class="toolbar-stack">
+          <span class="status-pill" id="nodeStats">0 个节点 / 0 条连线</span>
+          <div class="canvas-actions">
+            <button class="secondary" id="zoomOutBtn" type="button">缩小</button>
+            <button class="secondary" id="zoomResetBtn" type="button">100%</button>
+            <button class="secondary" id="zoomInBtn" type="button">放大</button>
+            <button class="secondary" id="fitCanvasBtn" type="button">适应画布</button>
+            <button class="secondary" id="autoLayoutBtn" type="button">自动排布</button>
+            <button class="secondary" id="copyWorkflowBtn" type="button">复制 Workflow JSON</button>
+            <button class="primary" id="runWorkflowBtn" type="button">执行当前 Workflow</button>
+          </div>
+        </div>
+      </div>
+
+      <section class="canvas-stage" id="canvasStage">
+        <div class="canvas-viewport" id="canvasViewport">
+          <svg class="edge-layer" id="edgeLayer"></svg>
+        </div>
+      </section>
+    </main>
+
+    <aside class="inspector">
+      <section class="field-group">
+        <h3>节点配置</h3>
+        <p class="muted">右侧配置区保持现有功能，但视觉上收成更像智能体项目开发页的属性面板。</p>
+      </section>
+
+      <section id="nodeInspector">
+        <div class="help-item">当前还没有选中节点。点击画布中的任意节点开始编辑。</div>
+      </section>
+
+      <section class="field-group">
+        <h3>Workflow JSON 预览</h3>
+        <div class="inspector-actions">
+          <button class="secondary" id="refreshPreviewBtn" type="button">刷新预览</button>
+        </div>
+        <div class="json-preview" id="workflowPreview"></div>
+      </section>
+
+      <section class="field-group">
+        <h3>当前连线</h3>
+        <div class="list-box" id="edgeList">
+          <div class="help-item">当前还没有连线。你可以从节点右侧拖到另一个节点左侧创建依赖。</div>
+        </div>
+      </section>
+
+      <section class="field-group">
+        <h3>执行结果</h3>
+        <div class="help-item" id="runResult">当前还没有执行记录。</div>
+      </section>
+
+      <section class="field-group">
+        <h3>流式输出</h3>
+        <div class="stream-output">
+          <div class="stream-box">
+            <strong>当前流式正文</strong>
+            <div class="stream-live-text" id="workflowLiveText">执行后，这里会持续显示最新正文。</div>
+          </div>
+          <div class="stream-box">
+            <strong>过程事件</strong>
+            <div class="stream-process" id="workflowProcess"><div class="stream-process-item">当前还没有过程事件。</div></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="field-group">
+        <h3>节点输出</h3>
+        <div class="node-stream-list" id="nodeStreamList">
+          <div class="help-item">执行后，这里会按节点展示运行状态、流式正文和最终结果。</div>
+        </div>
+      </section>
+
+      <section class="field-group">
+        <h3>数据流诊断</h3>
+        <div class="node-stream-list" id="nodeDiagnosticList">
+          <div class="help-item">执行后，这里会说明每个节点为什么正在等待、失败、跳过或已完成。</div>
+        </div>
+      </section>
+    </aside>
+  </div>
+
+  <script>
+    const STORAGE_KEY = 'workflow_builder_draft_v1';
+    const SERVER_URL_KEY = 'workflow_builder_server_url';
+
+    const dom = {
+      canvasStage: document.getElementById('canvasStage'),
+      canvasViewport: document.getElementById('canvasViewport'),
+      edgeLayer: document.getElementById('edgeLayer'),
+      nodeInspector: document.getElementById('nodeInspector'),
+      workflowPreview: document.getElementById('workflowPreview'),
+      nodeStats: document.getElementById('nodeStats'),
+      serverUrl: document.getElementById('serverUrl'),
+      checkHealthBtn: document.getElementById('checkHealthBtn'),
+      loadAgentsBtn: document.getElementById('loadAgentsBtn'),
+      healthStatus: document.getElementById('healthStatus'),
+      agentList: document.getElementById('agentList'),
+      capabilityLibrary: document.getElementById('capabilityLibrary'),
+      edgeList: document.getElementById('edgeList'),
+      runResult: document.getElementById('runResult'),
+      addNodeBtn: document.getElementById('addNodeBtn'),
+      resetGraphBtn: document.getElementById('resetGraphBtn'),
+      autoLayoutBtn: document.getElementById('autoLayoutBtn'),
+      zoomOutBtn: document.getElementById('zoomOutBtn'),
+      zoomResetBtn: document.getElementById('zoomResetBtn'),
+      zoomInBtn: document.getElementById('zoomInBtn'),
+      fitCanvasBtn: document.getElementById('fitCanvasBtn'),
+      copyWorkflowBtn: document.getElementById('copyWorkflowBtn'),
+      runWorkflowBtn: document.getElementById('runWorkflowBtn'),
+      refreshPreviewBtn: document.getElementById('refreshPreviewBtn'),
+      backIndexBtn: document.getElementById('backIndexBtn'),
+      workflowUserInput: document.getElementById('workflowUserInput'),
+      workflowLiveText: document.getElementById('workflowLiveText'),
+      workflowProcess: document.getElementById('workflowProcess'),
+      nodeStreamList: document.getElementById('nodeStreamList'),
+      nodeDiagnosticList: document.getElementById('nodeDiagnosticList')
+    };
+
+    const defaultWorkflowBuilderConfig = {
+      actionSuggestions: ['summarize', 'analyze', 'translate', 'generate', 'qa', 'chat', 'reason', 'plan', 'research', 'search', 'process'],
+      nodeTemplates: {
+        summarize: {
+          title: '总结节点',
+          capability: 'summarization',
+          action: 'summarize',
+          agent: 'deepseek-chat-agent',
+          prompt: '请总结输入内容，并给出 3 个要点。',
+          systemPrompt: '你是一个简洁的中文总结助手，请输出精炼结果。',
+          enableTools: false,
+          temperature: 0.3,
+          maxTokens: 2000,
+          extraParams: ''
+        },
+        analyze: {
+          title: '分析节点',
+          capability: 'text-analysis',
+          action: 'analyze',
+          agent: 'deepseek-chat-agent',
+          prompt: '请分析输入内容的主题、风险点和关键结论。',
+          systemPrompt: '你是一个严谨的中文分析助手，请输出结构清晰的分析结果。',
+          enableTools: false,
+          temperature: 0.3,
+          maxTokens: 2500,
+          extraParams: ''
+        },
+        translate: {
+          title: '翻译节点',
+          capability: 'translation',
+          action: 'translate',
+          agent: 'deepseek-chat-agent',
+          prompt: '请把输入内容翻译成中文，并保持原意准确。',
+          systemPrompt: '你是一个专业翻译助手，请给出自然流畅的中文结果。',
+          enableTools: false,
+          temperature: 0.2,
+          maxTokens: 2000,
+          extraParams: ''
+        },
+        polish: {
+          title: '整理输出节点',
+          capability: 'text-generation',
+          action: 'summarize',
+          agent: 'deepseek-chat-agent',
+          prompt: '请基于输入内容，整理成适合直接展示给用户的最终输出。',
+          systemPrompt: '你是一个中文整理助手，请把内容整理得更简洁、可读、可展示。',
+          enableTools: false,
+          temperature: 0.3,
+          maxTokens: 2000,
+          extraParams: ''
+        },
+        custom: {
+          title: '自定义节点',
+          capability: '',
+          action: 'analyze',
+          agent: 'deepseek-chat-agent',
+          prompt: '请根据输入完成指定任务，并直接输出结果。',
+          systemPrompt: '你是一个通用 AI 助手，请严格按照要求执行。',
+          enableTools: false,
+          temperature: 0.3,
+          maxTokens: 2000,
+          extraParams: ''
+        }
+      },
+      capabilityPresets: {
+        'question-answering': {
+          title: '问答节点',
+          action: 'qa',
+          prompt: '请基于输入内容直接回答问题，并给出清晰结论。',
+          systemPrompt: '你是一个准确的问答助手，请直接回答问题。',
+          hint: '适合知识问答、FAQ、面向用户的直接回答。',
+          extraParamsTemplate: ''
+        },
+        summarization: {
+          title: '总结节点',
+          action: 'summarize',
+          prompt: '请总结输入内容，并给出 3 个要点。',
+          systemPrompt: '你是一个简洁的中文总结助手，请输出精炼结果。',
+          hint: '适合摘要、要点提炼、长文本压缩。',
+          extraParamsTemplate: ''
+        },
+        'knowledge-extraction': {
+          title: '知识提取节点',
+          action: 'analyze',
+          prompt: '请从输入内容中提取关键实体、概念和事实。',
+          systemPrompt: '你是一个知识提取助手，请结构化输出关键信息。',
+          hint: '适合抽取实体、事实、属性和结构化信息。',
+          extraParamsTemplate: '{\n  "output_format": "bullet_list"\n}'
+        },
+        'text-generation': {
+          title: '生成节点',
+          action: 'generate',
+          prompt: '请基于输入内容生成更完整、可直接使用的结果。',
+          systemPrompt: '你是一个通用文本生成助手，请输出高质量结果。',
+          hint: '适合扩写、改写、生成说明文案。',
+          extraParamsTemplate: ''
+        },
+        conversation: {
+          title: '对话节点',
+          action: 'chat',
+          prompt: '请基于输入内容进行多轮式自然回应。',
+          systemPrompt: '你是一个自然、清晰的对话助手。',
+          hint: '适合连续对话、追问回应、陪伴式交互。',
+          extraParamsTemplate: ''
+        },
+        translation: {
+          title: '翻译节点',
+          action: 'translate',
+          prompt: '请把输入内容翻译成中文，并保持原意准确。',
+          systemPrompt: '你是一个专业翻译助手，请给出自然流畅的中文结果。',
+          hint: '适合多语言转换、术语一致化和风格调整。',
+          extraParamsTemplate: '{\n  "target_language": "zh-CN"\n}'
+        },
+        'text-analysis': {
+          title: '分析节点',
+          action: 'analyze',
+          prompt: '请分析输入内容的主题、风险点和关键结论。',
+          systemPrompt: '你是一个严谨的中文分析助手，请输出结构清晰的分析结果。',
+          hint: '适合做主题分析、风险研判、结论归纳。',
+          extraParamsTemplate: '{\n  "output_format": "sections"\n}'
+        },
+        'complex-reasoning': {
+          title: '推理规划节点',
+          action: 'reason',
+          prompt: '请基于输入内容进行分步推理，并给出可执行的结论或计划。',
+          systemPrompt: '你是一个严谨的推理与规划助手，请输出清晰步骤和最终结论。',
+          hint: '适合复杂规划、决策权衡、多因素推演。',
+          extraParamsTemplate: '{\n  "reasoning_style": "step_by_step"\n}'
+        },
+        'web-search': {
+          title: '搜索研究节点',
+          action: 'research',
+          prompt: '请基于输入主题进行搜索研究，汇总关键信息并给出结论。',
+          systemPrompt: '你是一个研究助手，需要优先调用可用工具获取信息。',
+          enableTools: true,
+          maxTokens: 3000,
+          hint: '适合需要联网检索、搜索汇总、事实核对的任务。',
+          extraParamsTemplate: '{\n  "search_depth": "medium"\n}'
+        },
+        'function-calling': {
+          title: '工具调用节点',
+          action: 'analyze',
+          prompt: '请在需要时主动调用工具完成任务，再输出最终结果。',
+          systemPrompt: '你是一个工具协作助手，优先利用可用工具补充信息。',
+          enableTools: true,
+          maxTokens: 3000,
+          hint: '适合计算、时间、天气、搜索等需要工具协作的节点。',
+          extraParamsTemplate: '{\n  "tool_mode": "auto"\n}'
+        },
+        'code-generation': {
+          title: '代码生成节点',
+          action: 'generate',
+          prompt: '请基于输入需求生成可执行代码，并说明关键实现点。',
+          systemPrompt: '你是一个专业编码助手，请输出正确、清晰的代码。',
+          hint: '适合代码草拟、脚本生成、示例实现。',
+          extraParamsTemplate: '{\n  "language": "go"\n}'
+        },
+        'code-review': {
+          title: '代码审查节点',
+          action: 'analyze',
+          prompt: '请审查输入代码，指出问题、风险和改进建议。',
+          systemPrompt: '你是一个严谨的代码审查助手，请优先指出真实问题。',
+          hint: '适合静态审查、风险识别、改进建议输出。',
+          extraParamsTemplate: '{\n  "severity": "all"\n}'
+        },
+        debugging: {
+          title: '调试节点',
+          action: 'analyze',
+          prompt: '请分析输入中的报错、异常或错误行为，并给出排查路径。',
+          systemPrompt: '你是一个调试助手，请优先定位根因和修复方向。',
+          hint: '适合报错排查、日志分析、根因定位。',
+          extraParamsTemplate: '{\n  "include_fix_suggestion": true\n}'
+        }
+      }
+    };
+
+    let workflowBuilderConfig = JSON.parse(JSON.stringify(defaultWorkflowBuilderConfig));
+
+    function getNodeTemplates() {
+      return workflowBuilderConfig.nodeTemplates || defaultWorkflowBuilderConfig.nodeTemplates;
+    }
+
+    function getCapabilityPresets() {
+      return workflowBuilderConfig.capabilityPresets || defaultWorkflowBuilderConfig.capabilityPresets;
+    }
+
+    function getActionSuggestions() {
+      return workflowBuilderConfig.actionSuggestions || defaultWorkflowBuilderConfig.actionSuggestions;
+    }
+
+    function mergeWorkflowBuilderConfig(payload) {
+      if (!payload || typeof payload !== 'object') {
+        return;
+      }
+      workflowBuilderConfig = {
+        actionSuggestions: Array.isArray(payload.actionSuggestions) && payload.actionSuggestions.length > 0
+          ? payload.actionSuggestions
+          : defaultWorkflowBuilderConfig.actionSuggestions,
+        nodeTemplates: {
+          ...defaultWorkflowBuilderConfig.nodeTemplates,
+          ...(payload.nodeTemplates || {})
+        },
+        capabilityPresets: {
+          ...defaultWorkflowBuilderConfig.capabilityPresets,
+          ...(payload.capabilityPresets || {})
+        }
+      };
+    }
+
+    let nodes = [];
+    let edges = [];
+    let selectedNodeId = '';
+    let dragState = null;
+    let connectState = null;
+    let nodeSeq = 1;
+    let availableAgents = [];
+    let availableCapabilities = [];
+    let zoomLevel = 1;
+    let panState = null;
+    let isSpacePressed = false;
+    let workflowEventSource = null;
+    let activeWorkflowExecutionId = '';
+    let workflowLiveText = '';
+    let workflowProcessEntries = [];
+    let nodeExecutionState = {};
+
+    const INPUT_NODE_ID = '__input__';
+
+    const CANVAS_WIDTH = 1800;
+    const CANVAS_HEIGHT = 1200;
+    const ZOOM_MIN = 0.5;
+    const ZOOM_MAX = 1.8;
+    const ZOOM_STEP = 0.1;
+
+    function normalizeNode(node) {
+      return {
+        ...node,
+        capability: node.capability || '',
+        enableTools: Boolean(node.enableTools),
+        temperature: typeof node.temperature === 'number' ? node.temperature : 0.3,
+        maxTokens: Number.isFinite(Number(node.maxTokens)) && Number(node.maxTokens) > 0 ? Number(node.maxTokens) : 2000,
+        extraParams: typeof node.extraParams === 'string' ? node.extraParams : ''
+      };
+    }
+
+    function getUserInputText() {
+      return dom.workflowUserInput.value || '';
+    }
+
+    function getInputNodePosition() {
+      return {
+        x: 24,
+        y: nodes.length > 0 ? Math.max(40, nodes[0].y - 30) : 96
+      };
+    }
+
+    function resetWorkflowStreamingView() {
+      workflowLiveText = '';
+      workflowProcessEntries = [];
+      nodeExecutionState = {};
+      dom.workflowLiveText.textContent = '执行后，这里会持续显示最新正文。';
+      dom.workflowProcess.innerHTML = '<div class="stream-process-item">当前还没有过程事件。</div>';
+      renderNodeStreams();
+    }
+
+    function renderNodeStreams() {
+      const cards = nodes.map((node) => {
+        const state = nodeExecutionState[node.id] || {};
+        const text = state.text || (state.result ? JSON.stringify(state.result, null, 2) : '等待执行');
+        return `
+          <div class="node-stream-item">
+            <strong>${escapeHtml(node.title)}</strong><br>
+            <span>${escapeHtml(node.id)} / ${escapeHtml(state.status || 'idle')}</span>
+            <div>${escapeHtml(text)}</div>
+          </div>
+        `;
+      });
+
+      dom.nodeStreamList.innerHTML = cards.length > 0
+        ? cards.join('')
+        : '<div class="help-item">执行后，这里会按节点展示运行状态、流式正文和最终结果。</div>';
+    }
+
+    function buildNodeDiagnostic(node) {
+      const state = nodeExecutionState[node.id] || {};
+      const binding = getNodeBindingState(node);
+
+      if (state.status === 'completed') {
+        return '已完成：该节点已经执行完毕，并且结果已写入执行上下文。';
+      }
+      if (state.status === 'running' || state.status === 'streaming') {
+        return '执行中：该节点已经被触发，正在处理或输出流式结果。';
+      }
+      if (state.status === 'failed') {
+        return `执行失败：${state.error || '当前节点执行出错。'}`;
+      }
+      if (state.status === 'skipped') {
+        return `已跳过：${state.error || '通常是上游失败、条件不满足或路由未命中。'}`;
+      }
+
+      if (binding.stepDeps.length === 0) {
+        return binding.receivesUserInput
+          ? '待执行：这是根节点，应该直接接收 user_input。若仍未启动，请检查当前服务是否已更新到最新版本。'
+          : '待执行：当前没有上游依赖，也没有显式接收输入。';
+      }
+
+      const failedDeps = binding.stepDeps.filter((depID) => {
+        const depState = nodeExecutionState[depID] || {};
+        return depState.status === 'failed' || depState.status === 'skipped';
+      });
+      if (failedDeps.length > 0) {
+        return `等待终止：上游节点失败或跳过（${failedDeps.join(' / ')}），当前节点不会继续执行。`;
+      }
+
+      const incompleteDeps = binding.stepDeps.filter((depID) => {
+        const depState = nodeExecutionState[depID] || {};
+        return depState.status !== 'completed';
+      });
+      if (incompleteDeps.length > 0) {
+        return `等待上游：仍在等待 ${incompleteDeps.join(' / ')} 完成。默认策略现在是 full，会等上游完整结果。`;
+      }
+
+      return '可执行未启动：上游已经完成，但当前节点还没收到 step_started。若持续停留在这里，通常说明服务还是旧版本或本轮 execution 不是最新配置。';
+    }
+
+    function renderNodeDiagnostics() {
+      const cards = nodes.map((node) => `
+        <div class="node-stream-item">
+          <strong>${escapeHtml(node.title)}</strong><br>
+          <span>${escapeHtml(node.id)}</span>
+          <div>${escapeHtml(buildNodeDiagnostic(node))}</div>
+        </div>
+      `);
+
+      dom.nodeDiagnosticList.innerHTML = cards.length > 0
+        ? cards.join('')
+        : '<div class="help-item">执行后，这里会说明每个节点为什么正在等待、失败、跳过或已完成。</div>';
+    }
+
+    function refreshCanvasExecutionState() {
+      renderNodes();
+      requestAnimationFrame(() => {
+        renderEdges();
+      });
+      renderEdgeList();
+      if (selectedNodeId === INPUT_NODE_ID || getNodeById(selectedNodeId)) {
+        renderInspector();
+      }
+    }
+
+    function renderWorkflowStreamingView() {
+      dom.workflowLiveText.textContent = workflowLiveText || '执行中，等待正文流式输出...';
+      dom.workflowProcess.innerHTML = workflowProcessEntries.length > 0
+        ? workflowProcessEntries.slice(0, 30).map((entry) => `<div class="stream-process-item">${escapeHtml(entry)}</div>`).join('')
+        : '<div class="stream-process-item">当前还没有过程事件。</div>';
+      renderNodeStreams();
+      renderNodeDiagnostics();
+      refreshCanvasExecutionState();
+    }
+
+    function pushWorkflowProcessEntry(label, detail) {
+      workflowProcessEntries.unshift(`[${new Date().toLocaleTimeString()}] ${label}${detail ? `\n${detail}` : ''}`);
+      workflowProcessEntries = workflowProcessEntries.slice(0, 30);
+      renderWorkflowStreamingView();
+    }
+
+    function getDefaultAgentForCapability(capability) {
+      if (!capability) {
+        return availableAgents.find((agent) => agent.name.includes('deepseek'))?.name
+          || availableAgents.find((agent) => !agent.name.includes('echo'))?.name
+          || availableAgents[0]?.name
+          || 'deepseek-chat-agent';
+      }
+      return availableAgents.find((agent) => Array.isArray(agent.capabilities) && agent.capabilities.includes(capability))?.name
+        || getDefaultAgentForCapability('');
+    }
+
+    function makeNode(templateKey, x, y, overrides = {}) {
+      const templates = getNodeTemplates();
+      const template = templates[templateKey] || templates.custom || templates.summarize;
+      const id = `node_${nodeSeq++}`;
+      return normalizeNode({
+        id,
+        title: template.title,
+        capability: template.capability || '',
+        action: template.action,
+        agent: overrides.agent || template.agent || getDefaultAgentForCapability(template.capability || ''),
+        prompt: template.prompt,
+        systemPrompt: template.systemPrompt,
+        enableTools: template.enableTools,
+        temperature: template.temperature,
+        maxTokens: template.maxTokens,
+        extraParams: template.extraParams,
+        x,
+        y,
+        ...overrides
+      });
+    }
+
+    function makeNodeFromCapability(capability, x, y, preferredAgent) {
+      const preset = getCapabilityPresets()[capability] || {};
+      return makeNode('custom', x, y, {
+        title: preset.title || `${capability} 节点`,
+        capability,
+        action: preset.action || 'analyze',
+        agent: preferredAgent || getDefaultAgentForCapability(capability),
+        prompt: preset.prompt || `请根据输入完成与 ${capability} 相关的任务，并直接输出结果。`,
+        systemPrompt: preset.systemPrompt || '你是一个通用 AI 助手，请严格按照要求执行。',
+        enableTools: Boolean(preset.enableTools),
+        temperature: 0.3,
+        maxTokens: preset.maxTokens || 2000,
+        extraParams: ''
+      });
+    }
+
+    function resetGraph() {
+      nodes = [
+        makeNode('summarize', 80, 80),
+        makeNode('analyze', 380, 120),
+        makeNode('polish', 700, 170)
+      ];
+      edges = [
+        { from: nodes[0].id, to: nodes[1].id },
+        { from: nodes[1].id, to: nodes[2].id }
+      ];
+      selectedNodeId = nodes[0].id;
+      renderAll();
+    }
+
+    function getServerUrl() {
+      return (dom.serverUrl.value || 'http://localhost:8080').trim().replace(/\/$/, '');
+    }
+
+    function saveDraft() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        nodeSeq,
+        nodes,
+        edges,
+        selectedNodeId,
+        userInput: getUserInputText()
+      }));
+      localStorage.setItem(SERVER_URL_KEY, getServerUrl());
+    }
+
+    function loadDraft() {
+      const savedUrl = localStorage.getItem(SERVER_URL_KEY);
+      if (savedUrl) {
+        dom.serverUrl.value = savedUrl;
+      }
+
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) {
+        resetGraph();
+        return;
+      }
+
+      try {
+        const parsed = JSON.parse(raw);
+        nodes = Array.isArray(parsed.nodes) ? parsed.nodes.map(normalizeNode) : [];
+        edges = Array.isArray(parsed.edges) ? parsed.edges : [];
+        nodeSeq = Number(parsed.nodeSeq) > 0 ? Number(parsed.nodeSeq) : 1;
+        selectedNodeId = parsed.selectedNodeId || nodes[0]?.id || '';
+        if (typeof parsed.userInput === 'string') {
+          dom.workflowUserInput.value = parsed.userInput;
+        }
+        if (nodes.length === 0) {
+          resetGraph();
+          return;
+        }
+        renderAll();
+      } catch (error) {
+        resetGraph();
+      }
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function getNodeById(id) {
+      return nodes.find((node) => node.id === id);
+    }
+
+    function ensureSelection() {
+      if (!selectedNodeId && nodes.length > 0) {
+        selectedNodeId = nodes[0].id;
+      }
+      if (selectedNodeId === INPUT_NODE_ID) {
+        return;
+      }
+      if (selectedNodeId && !getNodeById(selectedNodeId)) {
+        selectedNodeId = nodes[0]?.id || '';
+      }
+    }
+
+    function renderNodes() {
+      dom.canvasViewport.querySelectorAll('.node').forEach((nodeEl) => nodeEl.remove());
+      ensureSelection();
+
+      const inputPos = getInputNodePosition();
+      const inputEl = document.createElement('article');
+      inputEl.className = `node input-node ${INPUT_NODE_ID === selectedNodeId ? 'selected' : ''}`;
+      inputEl.dataset.nodeId = INPUT_NODE_ID;
+      inputEl.style.left = `${inputPos.x}px`;
+      inputEl.style.top = `${inputPos.y}px`;
+      inputEl.innerHTML = `
+        <div class="node-head">
+          <div class="node-title">
+            <strong>自然语言输入</strong>
+            <span>用户输入源 / {{user_input}}</span>
+          </div>
+          <span class="node-chip">input</span>
+        </div>
+        <div class="node-summary">${escapeHtml(getUserInputText() || '请在左侧填写本次工作流的自然语言输入。')}\n\n从右侧端口拖到任意节点，可显式把输入分发给该节点。</div>
+        <div class="node-port out" data-port="out"></div>
+      `;
+      dom.canvasViewport.appendChild(inputEl);
+
+      nodes.forEach((node) => {
+        const flags = buildNodeFlags(node);
+        const execution = nodeExecutionState[node.id] || {};
+        const el = document.createElement('article');
+        el.className = `node ${node.id === selectedNodeId ? 'selected' : ''} ${execution.status ? `status-${execution.status}` : ''}`.trim();
+        if (connectState?.hoverTargetId === node.id) {
+          el.classList.add('edge-target');
+        }
+        el.dataset.nodeId = node.id;
+        el.style.left = `${node.x}px`;
+        el.style.top = `${node.y}px`;
+        el.innerHTML = `
+          <div class="node-port in" data-port="in"></div>
+          <div class="node-head">
+            <div class="node-title">
+              <strong>${escapeHtml(node.title)}</strong>
+              <span>${escapeHtml(node.agent)}${node.capability ? ` / ${escapeHtml(node.capability)}` : ''}</span>
+            </div>
+            <span class="node-chip">${escapeHtml(node.action)}</span>
+          </div>
+          <div class="node-flags">${flags}</div>
+          <div class="node-summary">${escapeHtml(node.prompt)}${node.enableTools ? '\n\n已启用工具调用' : ''}</div>
+          <div class="node-port out" data-port="out"></div>
+        `;
+        dom.canvasViewport.appendChild(el);
+      });
+    }
+
+    function getPortPosition(nodeId, type) {
+      const el = dom.canvasViewport.querySelector(`.node[data-node-id="${nodeId}"]`);
+      if (!el) {
+        return { x: 0, y: 0 };
+      }
+      const rect = el.getBoundingClientRect();
+      const stageRect = dom.canvasViewport.getBoundingClientRect();
+      return {
+        x: (type === 'out' ? rect.right - stageRect.left : rect.left - stageRect.left) / zoomLevel,
+        y: (rect.top - stageRect.top + rect.height / 2) / zoomLevel
+      };
+    }
+
+    function getIncomingSources(nodeId) {
+      return edges.filter((edge) => edge.to === nodeId).map((edge) => edge.from);
+    }
+
+    function getNodeBindingState(node) {
+      const incoming = getIncomingSources(node.id);
+      const hasInputEdge = incoming.includes(INPUT_NODE_ID);
+      const stepDeps = incoming.filter((sourceID) => sourceID !== INPUT_NODE_ID);
+      const receivesUserInput = hasInputEdge || incoming.length === 0;
+      return {
+        incoming,
+        hasInputEdge,
+        stepDeps,
+        receivesUserInput
+      };
+    }
+
+    function buildNodeFlags(node) {
+      const binding = getNodeBindingState(node);
+      const execution = nodeExecutionState[node.id] || {};
+      const flags = [];
+
+      if (binding.receivesUserInput) {
+        flags.push('<span class="node-flag good">已接输入</span>');
+      } else {
+        flags.push('<span class="node-flag warn">未接输入</span>');
+      }
+
+      if (binding.stepDeps.length > 0) {
+        flags.push(`<span class="node-flag good">上游 ${binding.stepDeps.length}</span>`);
+      } else {
+        flags.push('<span class="node-flag">无上游结果</span>');
+      }
+
+      if (node.enableTools) {
+        flags.push('<span class="node-flag good">工具开启</span>');
+      }
+
+      if (execution.status === 'running' || execution.status === 'streaming') {
+        flags.push('<span class="node-flag good">执行中</span>');
+      } else if (execution.status === 'completed') {
+        flags.push('<span class="node-flag">已完成</span>');
+      } else if (execution.status === 'failed') {
+        flags.push('<span class="node-flag error">失败</span>');
+      }
+
+      return flags.join('');
+    }
+
+    function buildEdgePath(from, to) {
+      const dx = Math.max(80, Math.abs(to.x - from.x) * 0.45);
+      return `M ${from.x} ${from.y} C ${from.x + dx} ${from.y}, ${to.x - dx} ${to.y}, ${to.x} ${to.y}`;
+    }
+
+    function renderEdges() {
+      dom.edgeLayer.setAttribute('viewBox', `0 0 ${CANVAS_WIDTH} ${CANVAS_HEIGHT}`);
+      dom.edgeLayer.innerHTML = '';
+
+      edges.forEach((edge) => {
+        const from = getPortPosition(edge.from, 'out');
+        const to = getPortPosition(edge.to, 'in');
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('class', 'edge-path');
+        path.setAttribute('d', buildEdgePath(from, to));
+        dom.edgeLayer.appendChild(path);
+      });
+
+      if (connectState?.fromId) {
+        const from = getPortPosition(connectState.fromId, 'out');
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('class', 'edge-path temp-edge');
+        path.setAttribute('d', buildEdgePath(from, connectState.current));
+        dom.edgeLayer.appendChild(path);
+      }
+    }
+
+    function renderCapabilityLibrary() {
+      if (availableCapabilities.length === 0) {
+        dom.capabilityLibrary.innerHTML = '<div class="help-item">当前还没有加载到能力标签。点击“加载 Agent”后，这里会显示动态能力节点。</div>';
+        return;
+      }
+
+      dom.capabilityLibrary.innerHTML = availableCapabilities.map((item) => `
+        <div class="capability-pill">
+          <div>
+            <strong>${escapeHtml(item.capability)}</strong><br>
+            <span>${escapeHtml(item.agents.join(' / '))}</span>
+          </div>
+          <button type="button" data-capability="${escapeHtml(item.capability)}">插入</button>
+        </div>
+      `).join('');
+    }
+
+    function buildActionOptions(selectedAction) {
+      const options = [...new Set([...getActionSuggestions(), selectedAction || ''])].filter(Boolean);
+      return options.map((action) => `<option value="${escapeHtml(action)}">${escapeHtml(action)}</option>`).join('');
+    }
+
+    function getCapabilityPreset(capability) {
+      return getCapabilityPresets()[capability] || null;
+    }
+
+    function buildAgentOptions(selectedAgent) {
+      const options = availableAgents.length > 0
+        ? availableAgents.map((agent) => `<option value="${escapeHtml(agent.name)}" ${agent.name === selectedAgent ? 'selected' : ''}>${escapeHtml(agent.name)}</option>`).join('')
+        : `<option value="${escapeHtml(selectedAgent || 'deepseek-chat-agent')}" selected>${escapeHtml(selectedAgent || 'deepseek-chat-agent')}</option>`;
+      return options;
+    }
+
+    function buildCapabilityOptions(selectedCapability, selectedAgent) {
+      const capabilities = new Set();
+      if (selectedCapability) {
+        capabilities.add(selectedCapability);
+      }
+      const agent = availableAgents.find((item) => item.name === selectedAgent);
+      (agent?.capabilities || []).forEach((capability) => capabilities.add(capability));
+      availableCapabilities.forEach((item) => capabilities.add(item.capability));
+      return [`<option value="">未指定</option>`]
+        .concat([...capabilities].sort().map((capability) => `<option value="${escapeHtml(capability)}" ${capability === selectedCapability ? 'selected' : ''}>${escapeHtml(capability)}</option>`))
+        .join('');
+    }
+
+    function renderInspector() {
+      ensureSelection();
+      if (selectedNodeId === INPUT_NODE_ID) {
+        dom.nodeInspector.innerHTML = '<div class="help-item">当前选中的是自然语言输入节点。请在左侧“自然语言输入节点”区域直接编辑用户输入；根节点会自动拿到 {{user_input}}。</div>';
+        return;
+      }
+      const node = getNodeById(selectedNodeId);
+      if (!node) {
+        dom.nodeInspector.innerHTML = '<div class="help-item">当前还没有选中节点。点击画布中的任意节点开始编辑。</div>';
+        return;
+      }
+      const binding = getNodeBindingState(node);
+      const preset = getCapabilityPreset(node.capability);
+      const capabilityHint = preset?.hint
+        ? `<div class="help-item">${escapeHtml(preset.hint)}</div>`
+        : '';
+      const bindingHint = `<div class="help-item">${escapeHtml(
+        `${binding.receivesUserInput ? '当前节点会接收用户输入。' : '当前节点不会自动接收用户输入。'}${binding.stepDeps.length > 0 ? ` 当前节点还会接收 ${binding.stepDeps.length} 个上游节点结果：${binding.stepDeps.join(' / ')}。` : ' 当前节点没有上游结果输入。'}`
+      )}</div>`;
+      const renderedPrompt = buildRenderedPromptPreview(node);
+
+      dom.nodeInspector.innerHTML = `
+        ${capabilityHint}
+        ${bindingHint}
+        <div class="field-group">
+          <label>节点标题</label>
+          <input type="text" data-field="title" value="${escapeHtml(node.title)}">
+        </div>
+        <div class="field-group">
+          <label>Agent</label>
+          <select data-field="agent">
+            ${buildAgentOptions(node.agent)}
+          </select>
+        </div>
+        <div class="field-group">
+          <label>能力标签</label>
+          <select data-field="capability">
+            ${buildCapabilityOptions(node.capability, node.agent)}
+          </select>
+        </div>
+        <div class="field-group">
+          <label>Action</label>
+          <input type="text" list="actionSuggestions" data-field="action" value="${escapeHtml(node.action)}">
+        </div>
+        <div class="field-group">
+          <label>Prompt</label>
+          <textarea data-field="prompt">${escapeHtml(node.prompt)}</textarea>
+          <small>第一个根节点通常直接处理用户输入；后续节点可以通过连线表达依赖关系。</small>
+        </div>
+        <div class="field-group">
+          <label>System Prompt</label>
+          <textarea data-field="systemPrompt">${escapeHtml(node.systemPrompt)}</textarea>
+        </div>
+        <div class="field-group">
+          <label>高级参数</label>
+          <small>这里可以控制工具调用、采样温度和 token 上限；额外参数支持 JSON 对象，会并入 step params。</small>
+        </div>
+        <div class="field-group">
+          <label><input type="checkbox" data-field="enableTools" ${node.enableTools ? 'checked' : ''}> 启用工具调用</label>
+        </div>
+        <div class="field-group">
+          <label>Temperature</label>
+          <input type="number" min="0" max="2" step="0.1" data-field="temperature" value="${escapeHtml(node.temperature)}">
+        </div>
+        <div class="field-group">
+          <label>Max Tokens</label>
+          <input type="number" min="1" step="1" data-field="maxTokens" value="${escapeHtml(node.maxTokens)}">
+        </div>
+        <div class="field-group">
+          <label>额外 Params(JSON)</label>
+          <textarea data-field="extraParams">${escapeHtml(node.extraParams)}</textarea>
+        </div>
+        <div class="field-group">
+          <label>最终 Prompt 预览</label>
+          <div class="json-preview">${escapeHtml(renderedPrompt)}</div>
+        </div>
+        <div class="inspector-actions">
+          <button class="secondary" type="button" id="applyCapabilityPresetBtn">应用能力预设</button>
+          <button class="secondary" type="button" id="fillExtraParamsTemplateBtn">填充参数模板</button>
+          <button class="secondary" type="button" id="duplicateNodeBtn">复制节点</button>
+          <button class="ghost" type="button" id="deleteNodeBtn">删除节点</button>
+        </div>
+        <datalist id="actionSuggestions">${buildActionOptions(node.action)}</datalist>
+      `;
+    }
+
+    function renderAgentList() {
+      if (availableAgents.length === 0) {
+        dom.agentList.innerHTML = '<div class="help-item">当前还没有加载到 Agent。点击“加载 Agent”获取实时列表。</div>';
+        return;
+      }
+
+      dom.agentList.innerHTML = availableAgents.map((agent) => `
+        <div class="agent-pill">
+          <div>
+            <strong>${escapeHtml(agent.name)}</strong><br>
+            <span>${escapeHtml(agent.description || '无描述')}<br>${escapeHtml((agent.capabilities || []).join(' / ') || '无能力标签')}</span>
+          </div>
+          <button type="button" data-agent="${escapeHtml(agent.name)}">应用</button>
+        </div>
+      `).join('');
+    }
+
+    function renderEdgeList() {
+      if (edges.length === 0) {
+        dom.edgeList.innerHTML = '<div class="help-item">当前还没有连线。你可以从节点右侧拖到另一个节点左侧创建依赖。</div>';
+        return;
+      }
+
+      dom.edgeList.innerHTML = edges.map((edge, index) => {
+        const from = edge.from === INPUT_NODE_ID ? { title: '自然语言输入' } : getNodeById(edge.from);
+        const to = getNodeById(edge.to);
+        return `
+          <div class="edge-pill">
+            <div>
+              <strong>${escapeHtml(from?.title || edge.from)}</strong>
+              <span> → ${escapeHtml(to?.title || edge.to)}</span>
+            </div>
+            <button type="button" data-edge-index="${index}">删除</button>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function parseExtraParams(raw) {
+      if (!raw || !raw.trim()) {
+        return {};
+      }
+
+      const parsed = JSON.parse(raw);
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+        throw new Error('额外 Params 必须是 JSON 对象');
+      }
+      return parsed;
+    }
+
+    function buildPromptWithContext(node, stepDeps, receivesUserInput) {
+      const sections = [node.prompt];
+
+      if (receivesUserInput) {
+        sections.push('用户输入：{{user_input}}');
+      }
+
+      if (stepDeps.length > 0) {
+        const upstreamBlocks = stepDeps.map((depID) => {
+          return `上游节点 ${depID} 的文本输出：{{${depID}.result.text}}`;
+        }).join('\n\n');
+        sections.push(upstreamBlocks);
+      }
+
+      return sections.filter(Boolean).join('\n\n');
+    }
+
+    function buildRenderedPromptPreview(node) {
+      const binding = getNodeBindingState(node);
+      return buildPromptWithContext(node, binding.stepDeps, binding.receivesUserInput);
+    }
+
+    function buildWorkflowPayload() {
+      const roots = nodes.filter((node) => !edges.some((edge) => edge.to === node.id));
+      const primaryInput = roots[0]?.id || nodes[0]?.id || '';
+      const steps = nodes.map((node) => {
+        const incoming = edges.filter((edge) => edge.to === node.id).map((edge) => edge.from);
+        const hasInputEdge = incoming.includes(INPUT_NODE_ID);
+        const stepDeps = incoming.filter((sourceID) => sourceID !== INPUT_NODE_ID);
+        const receivesUserInput = hasInputEdge || incoming.length === 0;
+        const prompt = buildPromptWithContext(node, stepDeps, receivesUserInput);
+        const extraParams = parseExtraParams(node.extraParams || '');
+        return {
+          id: node.id,
+          agent: node.agent,
+          action: node.action,
+          depends_on: stepDeps.length > 0 ? stepDeps : undefined,
+          params: {
+            prompt,
+            system_prompt: node.systemPrompt,
+            enable_tools: node.enableTools,
+            temperature: Number(node.temperature) || 0.3,
+            max_tokens: Math.max(1, Number(node.maxTokens) || 2000),
+            ...extraParams
+          },
+          streaming: {
+            enabled: true,
+            wait_for: 'full',
+            min_start_tokens: undefined,
+            chunk_size: 40,
+            trigger_next: false,
+            buffer_strategy: 'memory'
+          }
+        };
+      });
+
+      return {
+        workflow: {
+          id: `wf-builder-${Date.now()}`,
+          name: 'Workflow Builder Draft',
+          steps
+        },
+        variables: {
+          source: 'workflow-builder',
+          primary_input_step_id: primaryInput,
+          user_input: getUserInputText() || '请在这里填写用户输入'
+        }
+      };
+    }
+
+    function renderPreview() {
+      try {
+        dom.workflowPreview.textContent = JSON.stringify(buildWorkflowPayload(), null, 2);
+        dom.nodeStats.textContent = `${nodes.length} 个节点 / ${edges.length} 条连线 / 缩放 ${Math.round(zoomLevel * 100)}%`;
+      } catch (error) {
+        dom.workflowPreview.textContent = `预览生成失败：${error.message}`;
+        dom.nodeStats.textContent = `${nodes.length} 个节点 / ${edges.length} 条连线 / 缩放 ${Math.round(zoomLevel * 100)}%`;
+      }
+    }
+
+    function getNodeBounds() {
+      if (nodes.length === 0) {
+        return {
+          minX: 0,
+          minY: 0,
+          maxX: 480,
+          maxY: 320
+        };
+      }
+
+      return nodes.reduce((acc, node) => {
+        acc.minX = Math.min(acc.minX, node.x);
+        acc.minY = Math.min(acc.minY, node.y);
+        acc.maxX = Math.max(acc.maxX, node.x + 220);
+        acc.maxY = Math.max(acc.maxY, node.y + 160);
+        return acc;
+      }, {
+        minX: Number.POSITIVE_INFINITY,
+        minY: Number.POSITIVE_INFINITY,
+        maxX: 0,
+        maxY: 0
+      });
+    }
+
+    function applyZoom(nextZoom, centerClientX, centerClientY) {
+      const clamped = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Number(nextZoom.toFixed(2))));
+      const previous = zoomLevel;
+      zoomLevel = clamped;
+      dom.canvasViewport.style.transform = `scale(${zoomLevel})`;
+
+      if (typeof centerClientX === 'number' && typeof centerClientY === 'number') {
+        const stageRect = dom.canvasStage.getBoundingClientRect();
+        const offsetX = centerClientX - stageRect.left + dom.canvasStage.scrollLeft;
+        const offsetY = centerClientY - stageRect.top + dom.canvasStage.scrollTop;
+        const ratio = zoomLevel / previous;
+        dom.canvasStage.scrollLeft = offsetX * ratio - (centerClientX - stageRect.left);
+        dom.canvasStage.scrollTop = offsetY * ratio - (centerClientY - stageRect.top);
+      }
+
+      renderPreview();
+      renderEdges();
+    }
+
+    function focusNode(nodeId) {
+      const node = getNodeById(nodeId);
+      if (!node) {
+        return;
+      }
+      selectedNodeId = node.id;
+      renderAll();
+
+      const viewportWidth = dom.canvasStage.clientWidth;
+      const viewportHeight = dom.canvasStage.clientHeight;
+      const targetLeft = Math.max(0, node.x * zoomLevel - viewportWidth / 2 + (220 * zoomLevel) / 2);
+      const targetTop = Math.max(0, node.y * zoomLevel - viewportHeight / 2 + (140 * zoomLevel) / 2);
+      dom.canvasStage.scrollTo({
+        left: targetLeft,
+        top: targetTop,
+        behavior: 'smooth'
+      });
+    }
+
+    function fitCanvasToNodes() {
+      const bounds = getNodeBounds();
+      const padding = 80;
+      const availableWidth = Math.max(320, dom.canvasStage.clientWidth - padding);
+      const availableHeight = Math.max(260, dom.canvasStage.clientHeight - padding);
+      const contentWidth = Math.max(320, bounds.maxX - bounds.minX + padding);
+      const contentHeight = Math.max(240, bounds.maxY - bounds.minY + padding);
+      const fittedZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.min(availableWidth / contentWidth, availableHeight / contentHeight)));
+
+      applyZoom(fittedZoom);
+
+      const offsetLeft = Math.max(0, bounds.minX * zoomLevel - padding / 2);
+      const offsetTop = Math.max(0, bounds.minY * zoomLevel - padding / 2);
+      dom.canvasStage.scrollTo({
+        left: offsetLeft,
+        top: offsetTop,
+        behavior: 'smooth'
+      });
+    }
+
+    function renderAll() {
+      renderNodes();
+      requestAnimationFrame(() => {
+        renderEdges();
+      });
+      renderInspector();
+      renderEdgeList();
+      renderPreview();
+      renderNodeStreams();
+      renderNodeDiagnostics();
+      saveDraft();
+    }
+
+    function renderNodeAndPreview() {
+      renderNodes();
+      requestAnimationFrame(() => {
+        renderEdges();
+      });
+      renderPreview();
+      renderNodeStreams();
+      renderNodeDiagnostics();
+      saveDraft();
+    }
+
+    function suggestAutoConnectSource() {
+      if (selectedNodeId === INPUT_NODE_ID) {
+        return INPUT_NODE_ID;
+      }
+      if (selectedNodeId && getNodeById(selectedNodeId)) {
+        return selectedNodeId;
+      }
+      if (nodes.length > 0) {
+        return nodes[nodes.length - 1].id;
+      }
+      return INPUT_NODE_ID;
+    }
+
+    function autoConnectNewNode(nodeId) {
+      const sourceId = suggestAutoConnectSource();
+      if (!sourceId || sourceId === nodeId) {
+        return;
+      }
+      if (edges.some((edge) => edge.to === nodeId)) {
+        return;
+      }
+      edges.push({ from: sourceId, to: nodeId });
+    }
+
+    function addNode(templateKey) {
+      const x = 80 + nodes.length * 80;
+      const y = 80 + nodes.length * 36;
+      const templates = getNodeTemplates();
+      const node = makeNode(templateKey, x, y, {
+        agent: getDefaultAgentForCapability(templates[templateKey]?.capability || '')
+      });
+      autoConnectNewNode(node.id);
+      nodes.push(node);
+      selectedNodeId = node.id;
+      renderAll();
+    }
+
+    function addNodeByCapability(capability) {
+      const x = 80 + nodes.length * 80;
+      const y = 80 + nodes.length * 36;
+      const node = makeNodeFromCapability(capability, x, y);
+      autoConnectNewNode(node.id);
+      nodes.push(node);
+      selectedNodeId = node.id;
+      renderAll();
+    }
+
+    function applyCapabilityPresetToNode(node) {
+      if (!node?.capability) {
+        return;
+      }
+      const preset = getCapabilityPreset(node.capability);
+      if (!preset) {
+        return;
+      }
+      node.title = preset.title || node.title;
+      node.action = preset.action || node.action;
+      node.prompt = preset.prompt || node.prompt;
+      node.systemPrompt = preset.systemPrompt || node.systemPrompt;
+      if (typeof preset.enableTools === 'boolean') {
+        node.enableTools = preset.enableTools;
+      }
+      if (preset.maxTokens) {
+        node.maxTokens = preset.maxTokens;
+      }
+    }
+
+    function fillExtraParamsTemplateForNode(node) {
+      if (!node?.capability) {
+        return;
+      }
+      const preset = getCapabilityPreset(node.capability);
+      if (!preset?.extraParamsTemplate) {
+        return;
+      }
+      node.extraParams = preset.extraParamsTemplate;
+    }
+
+    function addEdge(fromId, toId) {
+      if (!fromId || !toId || fromId === toId) {
+        return;
+      }
+      if (edges.some((edge) => edge.from === fromId && edge.to === toId)) {
+        return;
+      }
+      if (edges.some((edge) => edge.from === toId && edge.to === fromId)) {
+        return;
+      }
+      edges.push({ from: fromId, to: toId });
+      renderAll();
+    }
+
+    function duplicateSelectedNode() {
+      const current = getNodeById(selectedNodeId);
+      if (!current) {
+        return;
+      }
+      const clone = {
+        ...current,
+        id: `node_${nodeSeq++}`,
+        x: current.x + 36,
+        y: current.y + 36,
+        title: `${current.title} 副本`
+      };
+      nodes.push(clone);
+      selectedNodeId = clone.id;
+      renderAll();
+    }
+
+    function deleteSelectedNode() {
+      if (!selectedNodeId) {
+        return;
+      }
+      nodes = nodes.filter((node) => node.id !== selectedNodeId);
+      edges = edges.filter((edge) => edge.from !== selectedNodeId && edge.to !== selectedNodeId);
+      selectedNodeId = nodes[0]?.id || '';
+      renderAll();
+    }
+
+    dom.canvasStage.addEventListener('pointerdown', (event) => {
+      const outPort = event.target.closest('.node-port.out');
+      const inPort = event.target.closest('.node-port.in');
+      const nodeEl = event.target.closest('.node');
+
+      if (outPort && nodeEl) {
+        const nodeId = nodeEl.dataset.nodeId;
+        const stageRect = dom.canvasViewport.getBoundingClientRect();
+        connectState = {
+          fromId: nodeId,
+          current: {
+            x: (event.clientX - stageRect.left) / zoomLevel,
+            y: (event.clientY - stageRect.top) / zoomLevel
+          },
+          hoverTargetId: ''
+        };
+        renderEdges();
+        return;
+      }
+
+      if (inPort) {
+        return;
+      }
+
+      if (isSpacePressed) {
+        panState = {
+          startX: event.clientX,
+          startY: event.clientY,
+          scrollLeft: dom.canvasStage.scrollLeft,
+          scrollTop: dom.canvasStage.scrollTop
+        };
+        dom.canvasStage.classList.add('panning');
+        return;
+      }
+
+      if (nodeEl) {
+        selectedNodeId = nodeEl.dataset.nodeId;
+        if (selectedNodeId === INPUT_NODE_ID) {
+          renderAll();
+          return;
+        }
+        const node = getNodeById(selectedNodeId);
+        if (!node) {
+          return;
+        }
+        const rect = nodeEl.getBoundingClientRect();
+        dragState = {
+          id: node.id,
+          offsetX: (event.clientX - rect.left) / zoomLevel,
+          offsetY: (event.clientY - rect.top) / zoomLevel
+        };
+        nodeEl.classList.add('dragging');
+        renderAll();
+        return;
+      }
+
+      selectedNodeId = '';
+      renderAll();
+    });
+
+    window.addEventListener('pointermove', (event) => {
+      if (dragState) {
+        const stageRect = dom.canvasViewport.getBoundingClientRect();
+        const node = getNodeById(dragState.id);
+        if (!node) {
+          return;
+        }
+        node.x = Math.max(16, (event.clientX - stageRect.left - dragState.offsetX) / zoomLevel);
+        node.y = Math.max(16, (event.clientY - stageRect.top - dragState.offsetY) / zoomLevel);
+        renderAll();
+        return;
+      }
+
+      if (panState) {
+        dom.canvasStage.scrollLeft = panState.scrollLeft - (event.clientX - panState.startX);
+        dom.canvasStage.scrollTop = panState.scrollTop - (event.clientY - panState.startY);
+        return;
+      }
+
+      if (connectState) {
+        const stageRect = dom.canvasViewport.getBoundingClientRect();
+        connectState.current = {
+          x: (event.clientX - stageRect.left) / zoomLevel,
+          y: (event.clientY - stageRect.top) / zoomLevel
+        };
+        const inPort = event.target.closest('.node-port.in');
+        const targetNodeEl = inPort?.closest('.node');
+        connectState.hoverTargetId = targetNodeEl?.dataset.nodeId || '';
+        renderNodes();
+        renderEdges();
+      }
+    });
+
+    window.addEventListener('pointerup', (event) => {
+      if (dragState) {
+        dragState = null;
+        dom.canvasViewport.querySelectorAll('.node').forEach((nodeEl) => nodeEl.classList.remove('dragging'));
+      }
+
+      if (panState) {
+        panState = null;
+        dom.canvasStage.classList.remove('panning');
+      }
+
+      if (connectState) {
+        const inPort = event.target.closest('.node-port.in');
+        const targetNodeEl = inPort?.closest('.node');
+        if (targetNodeEl) {
+          addEdge(connectState.fromId, targetNodeEl.dataset.nodeId);
+        } else {
+          renderNodes();
+          renderEdges();
+        }
+        connectState = null;
+        renderNodes();
+        renderEdges();
+      }
+    });
+
+    dom.canvasStage.addEventListener('click', (event) => {
+      if (isSpacePressed) {
+        return;
+      }
+      const nodeEl = event.target.closest('.node');
+      if (!nodeEl) {
+        return;
+      }
+      selectedNodeId = nodeEl.dataset.nodeId;
+      renderAll();
+    });
+
+    dom.canvasStage.addEventListener('dblclick', (event) => {
+      const nodeEl = event.target.closest('.node');
+      if (!nodeEl) {
+        return;
+      }
+      focusNode(nodeEl.dataset.nodeId);
+    });
+
+    dom.nodeInspector.addEventListener('input', (event) => {
+      const target = event.target;
+      const node = getNodeById(selectedNodeId);
+      if (!node || !target.dataset.field) {
+        return;
+      }
+      if (target.dataset.field === 'enableTools') {
+        node.enableTools = Boolean(target.checked);
+      } else if (target.dataset.field === 'temperature') {
+        node.temperature = Number(target.value);
+      } else if (target.dataset.field === 'maxTokens') {
+        node.maxTokens = Number(target.value);
+      } else {
+        node[target.dataset.field] = target.value;
+      }
+      renderNodeAndPreview();
+    });
+
+    dom.nodeInspector.addEventListener('change', (event) => {
+      const target = event.target;
+      const node = getNodeById(selectedNodeId);
+      if (!node || !target.dataset.field) {
+        return;
+      }
+      if (target.dataset.field === 'agent') {
+        node.agent = target.value;
+      }
+      if (target.dataset.field === 'capability') {
+        node.capability = target.value;
+      }
+      renderAll();
+    });
+
+    dom.nodeInspector.addEventListener('click', (event) => {
+      if (event.target.id === 'applyCapabilityPresetBtn') {
+        const node = getNodeById(selectedNodeId);
+        if (!node?.capability) {
+          dom.runResult.textContent = '当前节点还没有选择能力标签，无法应用预设。';
+          return;
+        }
+        applyCapabilityPresetToNode(node);
+        renderAll();
+      }
+      if (event.target.id === 'fillExtraParamsTemplateBtn') {
+        const node = getNodeById(selectedNodeId);
+        if (!node?.capability) {
+          dom.runResult.textContent = '当前节点还没有选择能力标签，无法填充参数模板。';
+          return;
+        }
+        fillExtraParamsTemplateForNode(node);
+        renderAll();
+      }
+      if (event.target.id === 'duplicateNodeBtn') {
+        duplicateSelectedNode();
+      }
+      if (event.target.id === 'deleteNodeBtn') {
+        deleteSelectedNode();
+      }
+    });
+
+    dom.agentList.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-agent]');
+      if (!button) {
+        return;
+      }
+      const node = getNodeById(selectedNodeId);
+      if (!node) {
+        return;
+      }
+      node.agent = button.dataset.agent;
+      renderAll();
+    });
+
+    dom.capabilityLibrary.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-capability]');
+      if (!button) {
+        return;
+      }
+      addNodeByCapability(button.dataset.capability);
+    });
+
+    dom.edgeList.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-edge-index]');
+      if (!button) {
+        return;
+      }
+      const index = Number(button.dataset.edgeIndex);
+      if (Number.isNaN(index)) {
+        return;
+      }
+      edges.splice(index, 1);
+      renderAll();
+    });
+
+    dom.addNodeBtn.addEventListener('click', () => addNode('summarize'));
+    dom.resetGraphBtn.addEventListener('click', resetGraph);
+    dom.zoomOutBtn.addEventListener('click', () => applyZoom(zoomLevel - ZOOM_STEP));
+    dom.zoomResetBtn.addEventListener('click', () => applyZoom(1));
+    dom.zoomInBtn.addEventListener('click', () => applyZoom(zoomLevel + ZOOM_STEP));
+    dom.fitCanvasBtn.addEventListener('click', fitCanvasToNodes);
+    dom.autoLayoutBtn.addEventListener('click', () => {
+      nodes.forEach((node, index) => {
+        node.x = 80 + index * 280;
+        node.y = 120 + (index % 2) * 80;
+      });
+      renderAll();
+    });
+    dom.refreshPreviewBtn.addEventListener('click', renderPreview);
+    dom.copyWorkflowBtn.addEventListener('click', async () => {
+      try {
+        const content = JSON.stringify(buildWorkflowPayload(), null, 2);
+        await navigator.clipboard.writeText(content);
+        dom.runResult.textContent = 'Workflow JSON 已复制到剪贴板。';
+      } catch (error) {
+        dom.runResult.textContent = `复制 Workflow JSON 失败：${error.message}`;
+      }
+    });
+    dom.backIndexBtn.addEventListener('click', () => {
+      window.location.href = './index.html';
+    });
+
+    dom.serverUrl.addEventListener('change', saveDraft);
+    dom.workflowUserInput.addEventListener('input', () => {
+      renderNodeAndPreview();
+      if (selectedNodeId === INPUT_NODE_ID) {
+        renderInspector();
+      }
+    });
+
+    dom.checkHealthBtn.addEventListener('click', async () => {
+      dom.healthStatus.textContent = '正在检查服务状态...';
+      try {
+        const response = await fetch(`${getServerUrl()}/health`);
+        const payload = await response.json();
+        dom.healthStatus.textContent = response.ok
+          ? `服务正常：${payload.data?.status || 'healthy'}`
+          : `服务检查失败：${payload.error || response.status}`;
+      } catch (error) {
+        dom.healthStatus.textContent = `服务检查失败：${error.message}`;
+      }
+    });
+
+    async function loadAgents() {
+      dom.agentList.innerHTML = '<div class="help-item">正在加载 Agent 列表...</div>';
+      try {
+        const response = await fetch(`${getServerUrl()}/api/v1/agents`);
+        const payload = await response.json();
+        availableAgents = Array.isArray(payload.data?.agents) ? payload.data.agents : [];
+        const capabilityMap = new Map();
+        availableAgents.forEach((agent) => {
+          (agent.capabilities || []).forEach((capability) => {
+            if (!capabilityMap.has(capability)) {
+              capabilityMap.set(capability, []);
+            }
+            capabilityMap.get(capability).push(agent.name);
+          });
+        });
+        availableCapabilities = [...capabilityMap.entries()]
+          .map(([capability, agents]) => ({ capability, agents }))
+          .sort((a, b) => a.capability.localeCompare(b.capability));
+        renderAgentList();
+        renderCapabilityLibrary();
+        renderInspector();
+      } catch (error) {
+        dom.agentList.innerHTML = `<div class="help-item">加载 Agent 失败：${escapeHtml(error.message)}</div>`;
+        dom.capabilityLibrary.innerHTML = `<div class="help-item">加载能力节点失败：${escapeHtml(error.message)}</div>`;
+      }
+    }
+
+    async function loadWorkflowBuilderConfig() {
+      try {
+        const response = await fetch('./workflow_builder_config.json', { cache: 'no-cache' });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        mergeWorkflowBuilderConfig(payload);
+      } catch (error) {
+        workflowBuilderConfig = JSON.parse(JSON.stringify(defaultWorkflowBuilderConfig));
+        dom.runResult.textContent = `已回退到内置节点配置：${error.message}`;
+      }
+    }
+
+    async function fetchWorkflowExecution(executionID) {
+      const response = await fetch(`${getServerUrl()}/api/v1/executions/${executionID}`);
+      const payload = await response.json();
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+
+      const execution = payload.data || {};
+      (execution.steps || []).forEach((step) => {
+        nodeExecutionState[step.id] = {
+          ...(nodeExecutionState[step.id] || {}),
+          status: step.status || nodeExecutionState[step.id]?.status || 'completed',
+          result: step.result || nodeExecutionState[step.id]?.result || null,
+          text: step.result?.text || nodeExecutionState[step.id]?.text || '',
+          error: step.error || nodeExecutionState[step.id]?.error || ''
+        };
+      });
+      renderWorkflowStreamingView();
+    }
+
+    function stopWorkflowSse() {
+      if (workflowEventSource) {
+        workflowEventSource.close();
+        workflowEventSource = null;
+      }
+    }
+
+    function applyWorkflowEvent(payload) {
+      if (!payload || payload.execution_id !== activeWorkflowExecutionId) {
+        return;
+      }
+
+      const stepID = payload.data?.step_id || payload.result?.step_id || '';
+      const state = stepID ? (nodeExecutionState[stepID] = nodeExecutionState[stepID] || {}) : null;
+
+      if (payload.type === 'step_started' && state) {
+        state.status = 'running';
+      }
+      if ((payload.type === 'token_generated' || payload.type === 'assistant_response') && state) {
+        const text = payload.result?.text || payload.result?.content || payload.data?.result?.text || payload.data?.result?.content || '';
+        if (text) {
+          state.text = text;
+          state.status = 'streaming';
+          workflowLiveText = text;
+        }
+      }
+      if ((payload.type === 'step_completed' || payload.type === 'step_completed_partial') && state) {
+        state.status = 'completed';
+        state.result = payload.data?.result || payload.result || state.result || null;
+        state.text = state.result?.text || state.result?.content || state.text || '';
+        workflowLiveText = state.text || workflowLiveText;
+      }
+      if (payload.type === 'failed' && state) {
+        state.status = 'failed';
+        state.error = payload.data?.error || payload.error || payload.message || state.error || '';
+      }
+
+      pushWorkflowProcessEntry(payload.type || 'event', payload.message || '');
+    }
+
+    function startWorkflowSse(executionID) {
+      stopWorkflowSse();
+      activeWorkflowExecutionId = executionID;
+      workflowEventSource = new EventSource(`${getServerUrl()}/api/v1/executions/${executionID}/stream`);
+
+      workflowEventSource.onmessage = (event) => {
+        try {
+          applyWorkflowEvent(JSON.parse(event.data));
+        } catch {}
+      };
+
+      ['connected', 'step_started', 'step_streaming', 'token_generated', 'assistant_response', 'step_completed', 'step_completed_partial', 'completed', 'failed'].forEach((name) => {
+        workflowEventSource.addEventListener(name, async (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            applyWorkflowEvent(payload);
+            if (name === 'completed' || name === 'failed') {
+              await fetchWorkflowExecution(executionID);
+            }
+          } catch {}
+        });
+      });
+
+      workflowEventSource.onerror = async () => {
+        const terminalStates = ['completed', 'failed', 'cancelled'];
+        const hasTerminalNode = Object.values(nodeExecutionState).some((state) => terminalStates.includes(state?.status));
+        pushWorkflowProcessEntry('sse', hasTerminalNode ? '连接已正常结束' : '连接已结束或出现异常');
+        stopWorkflowSse();
+        try {
+          await fetchWorkflowExecution(executionID);
+        } catch {}
+      };
+    }
+
+    dom.loadAgentsBtn.addEventListener('click', loadAgents);
+
+    dom.runWorkflowBtn.addEventListener('click', async () => {
+      dom.runResult.textContent = '正在创建 workflow execution...';
+      try {
+        resetWorkflowStreamingView();
+        const payload = buildWorkflowPayload();
+
+        const response = await fetch(`${getServerUrl()}/api/v1/workflows/execute`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+          throw new Error(data.error || `HTTP ${response.status}`);
+        }
+
+        const execution = data.data || {};
+        localStorage.setItem('execution_demo_server_url', getServerUrl());
+        activeWorkflowExecutionId = execution.id || '';
+        startWorkflowSse(activeWorkflowExecutionId);
+        fetchWorkflowExecution(activeWorkflowExecutionId).catch(() => {});
+        dom.runResult.innerHTML = `
+          <strong>创建成功</strong><br>
+          execution_id=${escapeHtml(execution.id || '')}<br>
+          status=${escapeHtml(execution.status || '')}<br>
+          <span>你可以回主控制台的“执行跟踪”页查看，也可以直接打开下面地址：</span><br>
+          <span>${escapeHtml(`./index.html#execution=${execution.id}`)}</span>
+        `;
+      } catch (error) {
+        dom.runResult.textContent = `执行失败：${error.message}`;
+      }
+    });
+
+    document.querySelectorAll('[data-template]').forEach((button) => {
+      button.addEventListener('click', () => {
+        addNode(button.dataset.template);
+      });
+    });
+
+    dom.canvasStage.addEventListener('wheel', (event) => {
+      if (!event.ctrlKey && !event.metaKey) {
+        return;
+      }
+      event.preventDefault();
+      const direction = event.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP;
+      applyZoom(zoomLevel + direction, event.clientX, event.clientY);
+    }, { passive: false });
+
+    window.addEventListener('keydown', (event) => {
+      if (event.code === 'Space' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName || '')) {
+        isSpacePressed = true;
+      }
+    });
+
+    window.addEventListener('keyup', (event) => {
+      if (event.code === 'Space') {
+        isSpacePressed = false;
+        if (panState) {
+          panState = null;
+          dom.canvasStage.classList.remove('panning');
+        }
+      }
+    });
+
+    window.addEventListener('resize', renderEdges);
+
+    async function initWorkflowBuilder() {
+      await loadWorkflowBuilderConfig();
+      renderAgentList();
+      renderCapabilityLibrary();
+      resetWorkflowStreamingView();
+      loadDraft();
+      applyZoom(1);
+      await loadAgents();
+      renderAll();
+    }
+
+    initWorkflowBuilder();
+  </script>
+</body>
+</html>

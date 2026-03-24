@@ -11,8 +11,8 @@ import (
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/tool"
 )
 
-// DeepSeekAgent is an agent that uses DeepSeek API for lightweight tasks
-// Suitable for: Q&A, summarization, knowledge extraction
+// DeepSeekAgent is an agent that uses DeepSeek API for general-purpose tasks
+// Suitable for: Q&A, summarization, translation, analysis, reasoning, and tool use
 type DeepSeekAgent struct {
 	name         string
 	description  string
@@ -32,19 +32,23 @@ func NewDeepSeekAgent(name string, apiKey string) *DeepSeekAgent {
 
 	return &DeepSeekAgent{
 		name:        name,
-		description: "DeepSeek agent for Q&A, summarization, and knowledge tasks",
+		description: "DeepSeek agent for general-purpose text, analysis, reasoning, and tool tasks",
 		capabilities: []string{
 			"question-answering",   // 问答
 			"summarization",        // 总结
 			"knowledge-extraction", // 知识提取
 			"text-generation",      // 文本生成
 			"conversation",         // 对话
+			"translation",          // 翻译
+			"text-analysis",        // 文本分析
+			"complex-reasoning",    // 复杂推理
+			"web-search",           // 联网搜索（通过工具）
 			"function-calling",     // 工具调用
 		},
 		client:       openai.NewClientWithConfig(config),
 		model:        "deepseek-chat", // DeepSeek 默认模型
 		temperature:  0.7,
-		maxTokens:    2000,
+		maxTokens:    4000,
 		toolRegistry: tool.NewRegistry(), // Initialize tool registry
 	}
 }
@@ -78,6 +82,13 @@ func (a *DeepSeekAgent) GetCapabilities() []string {
 func (a *DeepSeekAgent) Init(config *Config) error {
 	if config == nil {
 		return nil
+	}
+
+	if config.Description != "" {
+		a.description = config.Description
+	}
+	if len(config.Capabilities) > 0 {
+		a.capabilities = append([]string(nil), config.Capabilities...)
 	}
 
 	// 从配置中读取模型设置

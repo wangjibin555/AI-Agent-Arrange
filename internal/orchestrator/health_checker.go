@@ -91,6 +91,14 @@ func (hc *HealthChecker) checkAgent(ctx context.Context, name string, ag agent.A
 	checkCtx, cancel := context.WithTimeout(ctx, hc.timeout)
 	defer cancel()
 
+	// 只有显式声明 health-check 能力的 Agent 才执行主动探活。
+	// 像 OpenAI / DeepSeek 这类 LLM Agent 不支持 ping，并且通常要求 prompt，
+	// 这里如果硬发 ping 只会产生误判，进而触发错误的任务迁移。
+	if !supportsHealthCheck(ag) {
+		hc.markAgentHealthy(name)
+		return
+	}
+
 	// 执行健康检查（发送一个简单的测试任务）
 	input := &agent.TaskInput{
 		TaskID: "health-check-" + name,
@@ -147,6 +155,29 @@ func (hc *HealthChecker) checkAgent(ctx context.Context, name string, ag agent.A
 		status.ErrorMessage = ""
 	}
 
+	hc.agentStatus[name] = status
+}
+
+func supportsHealthCheck(ag agent.Agent) bool {
+	for _, capability := range ag.GetCapabilities() {
+		if capability == "health-check" {
+			return true
+		}
+	}
+	return false
+}
+
+func (hc *HealthChecker) markAgentHealthy(name string) {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+
+	status := hc.agentStatus[name]
+	status.Name = name
+	status.Healthy = true
+	status.LastCheckTime = time.Now()
+	status.LastHealthyTime = status.LastCheckTime
+	status.FailureCount = 0
+	status.ErrorMessage = ""
 	hc.agentStatus[name] = status
 }
 

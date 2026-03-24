@@ -1,64 +1,136 @@
 # AI-Agent-Arrange
-AI Agent编排框架
 
-    做 AI Agent 编排工具时，核心是解决 “多 Agent 协同完成复杂任务” 的问题，涉及 AI 能力、任务调度、工程化落地等多个层面。以下是重点、难点及核心技术点的拆解，结合工程实践和技术选型展开：
-### 一、核心目标与场景定位
-    先明确工具的核心价值：让多个 AI Agent（可调用不同大模型、工具）按规则协同工作，拆解复杂任务并输出结果。典型场景：
-    多步骤任务（如 “写一篇行业报告”→ 拆解为 “查数据→分析趋势→生成文档”，由不同 Agent 分工）；
-    跨工具协作（如 “处理用户上传的表格并生成可视化”→ 调用文件解析 Agent→数据处理 Agent→绘图 Agent）。
-### 二、重点技术点（必须实现的基础能力）
-1. Agent 核心结构设计
-    每个 Agent 需具备基础 “智能”，核心模块包括：
-    任务理解与拆分：接收上层任务（或用户指令），判断是否需要拆分（如复杂问题拆分为子任务），决定是否调用其他 Agent 或工具。
-   技术点：基于大模型的 Prompt 工程（设计指令模板，让 Agent 理解 “何时拆分任务”“如何分配给其他 Agent”）。
-   工具调用能力：集成外部工具（API、数据库、本地函数等），需定义标准化接口（如工具名称、参数格式、返回值类型），让 Agent 能按格式调用。
-   示例：用 JSON Schema 定义工具参数，大模型生成符合格式的调用指令，编排引擎解析后执行。
-   记忆管理：短期记忆（当前对话上下文、任务进度）和长期记忆（历史任务结果、用户偏好）。
-   实现：短期记忆用 Redis 缓存，长期记忆用 MySQL/MinIO 存储（结合向量数据库做语义检索，如 Milvus，支持记忆的高效查询）。
-2. 编排引擎（核心调度逻辑）
-   负责管理 Agent 的生命周期、任务分配和结果聚合，是工具的 “大脑”：
-   任务流定义：支持可视化或代码化定义 Agent 协作规则（如 “Agent A 完成后触发 Agent B，若 A 失败则调用 Agent C 重试”）。
-   技术选型：轻量可用状态机（如 Golang 的stateify），复杂场景可集成 Workflow 引擎（如 Camunda，但需简化）。
-   消息通信机制：Agent 间通过消息传递任务和结果，需保证可靠性（避免消息丢失）和顺序性（如子任务依赖父任务结果）。
-   实现：用 Kafka 作为消息队列（支持分区和消费者组，确保消息有序），每个 Agent 对应独立的消费 Topic。
-   优先级与资源控制：高优先级任务（如用户实时请求）优先调度，限制单个 Agent 的资源占用（如并发数、大模型调用频率）。
-   技术点：基于权重的调度算法，结合 K8s 的资源限制（CPU / 内存）控制 Agent 实例。
-3. 大模型集成与适配
-   Agent 的 “智能” 依赖大模型，需解决兼容性和效率问题：
-   多模型适配：支持不同大模型（OpenAI、GPT-4、通义千问等），统一接口封装（如抽象Generate方法，适配各模型的 API 参数）。
-   Token 成本与效率控制：长对话场景下，通过 “记忆摘要” 减少输入 Token（如用大模型压缩历史对话），避免 API 调用成本过高。
-   函数调用（Function Call）优化：确保 Agent 能准确生成工具调用格式（如避免 JSON 语法错误），可通过 “格式校验中间件” 修复无效调用。
-### 三、难点与解决方案
-1. Agent 协同的 “智能性” 不足（核心难点）
-   问题：Agent 可能无法正确拆分任务、选错协作对象（如让绘图 Agent 处理数据计算），导致任务失败。
-   解决思路：
-   强化 Prompt 工程：在编排引擎中嵌入 “协作规则提示”（如 “当任务涉及数据计算，优先调用 CalculatorAgent”）。
-   人类反馈优化（RLHF）：记录 Agent 协作的成功 / 失败案例，用少量人工标注数据微调大模型，提升任务分配准确性。
-   动态能力注册：Agent 启动时注册自身能力（如 “擅长数据分析”“支持 Excel 解析”），编排引擎基于能力标签匹配任务。
-2. 任务依赖与死锁
-   问题：多 Agent 间可能形成循环依赖（如 Agent A 等待 Agent B 的结果，B 同时等待 A），导致任务卡住。
-   解决思路：
-   有向无环图（DAG）校验：编排引擎在任务流提交时，检查依赖关系是否存在环，拒绝无效任务流。
-   超时与重试机制：为每个 Agent 的任务设置超时时间（如 30 秒），超时后触发重试或降级策略（如调用备用 Agent）。
-3. 分布式环境下的可靠性
-   问题：Agent 实例崩溃、消息丢失、大模型 API 超时等，可能导致任务中断。
-   解决思路：
-   状态持久化：编排引擎定期将任务进度（如 “已完成步骤 1，等待步骤 2”）写入数据库，崩溃后可从断点恢复。
-   熔断与降级：当某个 Agent 或工具连续失败（如大模型 API 超时），自动切换到备用方案（如用本地模型替代）。
-   监控告警：用 Prometheus 监控 Agent 的调用成功率、任务耗时，异常时通过 Grafana 告警，及时介入排查。
-4. 用户体验与可扩展性
-   问题：用户难以定义任务流，或新增 Agent / 工具时需大量代码改造。
-   解决思路：
-   低代码界面：提供可视化编辑器（如基于 Vue/React），用户拖拽 Agent 节点、配置依赖关系，自动生成任务流配置（如 YAML）。
-   插件化架构：Agent 和工具通过接口注册（如 Go 的plugin包或微服务注册中心），新增组件时无需修改核心引擎代码。
-### 四、工程化落地建议（结合你的技术栈）
-   技术选型适配：
-   用 Golang 实现核心编排引擎（高性能、适合并发调度）；
-   用 Redis 存储 Agent 状态和短期记忆，MySQL 存储任务历史，MinIO 存储大文件（如用户上传的文档）；
-   用 K8s 部署 Agent 集群（方便扩缩容），通过 ConfigMap 管理大模型 API 密钥等配置。
-   最小可用版本（MVP）优先：先实现 “单任务→单 Agent→单工具” 的基础流程，再逐步叠加多 Agent 协作、记忆管理等功能，避免一开始陷入复杂逻辑。
-   简历亮点设计：
-   突出 “AI + 工程化” 结合（如用 K8s 调度 Agent，Prometheus 监控大模型调用指标）；
-   强调解决的实际问题（如通过 DAG 校验避免任务死锁，用向量数据库优化 Agent 记忆检索）。
-### 总结
-   核心难点是 “让 Agent 协同更智能” 和 “保障分布式环境下的可靠性”，技术重点在于编排引擎的调度逻辑、Agent 的能力抽象、以及与大模型 / 工具的高效集成。从简单场景入手，结合你的中间件和 K8s 技术栈，优先落地可演示的功能，再迭代优化，是比较务实的路径。
+一个基于 Go 的多 Agent 编排服务，当前已经提供两类执行入口：
+
+- `task`：单任务 / 单 Agent 执行
+- `workflow`：多步骤 DAG / 流式工作流执行
+
+对外推荐统一围绕 `execution` 模型接入：
+
+- 创建 task：`POST /api/v1/tasks`
+- 执行 workflow：`POST /api/v1/workflows/execute`
+- 查询 execution：`GET /api/v1/executions/:id`
+- 取消 execution：`DELETE /api/v1/executions/:id`
+- 订阅 execution SSE：`GET /api/v1/executions/:id/stream`
+
+## 当前重点
+
+当前版本已经完成这些主链路：
+
+- 统一 execution 查询、取消、SSE 事件流
+- workflow execution 持久化
+- workflow recovery 状态字段：`recovery_status`
+- workflow recovery handoff 字段：`superseded_by_execution_id`
+- 最小端到端 demo：task / workflow / execution / SSE
+
+## Agent 能力定位
+
+当前内置的 Agent 分工可以简单理解为：
+
+- `echo-agent-*`：用于联调、回显、健康检查、基础流程验证
+- `deepseek-chat-agent`：用于通用文本任务，包括问答、总结、翻译、分析、推理、工具调用
+- `openai-gpt-agent`：用于代码生成、代码审查、调试、复杂推理等更偏工程和编码的任务
+
+如果只是验证通用文本处理链路，默认优先使用 `deepseek-chat-agent`。
+如果任务明确偏代码、调试、审查，再优先使用 `openai-gpt-agent`。
+
+## 快速开始
+
+### 1. 启动服务
+
+```bash
+go run cmd/server/main.go
+```
+
+或先看更完整的启动步骤：
+
+- [快速开始指南](./QUICKSTART.md)
+
+### 2. 运行统一 execution 演示
+
+服务启动后，直接运行：
+
+```bash
+./scripts/demo_unified_execution.sh
+```
+
+这个脚本会演示：
+
+- 创建 task 并通过 execution 查询结果
+- 创建 workflow 并通过 execution 查询结果
+- 订阅 execution SSE
+- 可选检查 recovery handoff
+
+如果服务不在默认地址：
+
+```bash
+SERVER_URL=http://127.0.0.1:8080 ./scripts/demo_unified_execution.sh
+```
+
+如果要检查某个旧 execution 是否被新 execution 接管：
+
+```bash
+RECOVERY_EXECUTION_ID=<execution-id> ./scripts/demo_unified_execution.sh
+```
+
+## 推荐接入方式
+
+### 创建入口
+
+- 普通任务：调用 `POST /api/v1/tasks`
+- 工作流：调用 `POST /api/v1/workflows/execute`
+
+### 统一跟踪入口
+
+无论从哪条入口创建，后续都推荐统一走：
+
+- `GET /api/v1/executions/:id`
+- `GET /api/v1/executions/:id/stream`
+
+### recovery 字段
+
+workflow execution 可能额外带：
+
+- `recovery_status`
+- `superseded_by_execution_id`
+
+当旧 execution 被恢复链路接管时：
+
+- 旧 execution：`recovery_status = "superseded"`
+- 新 execution：`recovery_status = "resumed"`
+
+如果旧 execution 响应里带有 `superseded_by_execution_id`，客户端应切换去跟踪新的 execution ID。
+
+## 文档入口
+
+- [快速开始指南](./QUICKSTART.md)
+- [统一 execution 接入说明](./docs/api/UNIFIED_EXECUTION_INTEGRATION_GUIDE.md)
+- [统一 execution API 使用指南](./docs/api/UNIFIED_EXECUTION_API_GUIDE.md)
+- [文档目录](./docs/README.md)
+
+## 项目结构
+
+```text
+AI-Agent-Arrange/
+├── cmd/server/                 # 服务启动入口
+├── internal/agent/             # Agent 实现
+├── internal/orchestrator/      # task 调度系统
+├── internal/workflow/          # workflow 执行系统
+├── internal/api/               # HTTP API + SSE
+├── internal/storage/mysql/     # MySQL 持久化
+├── scripts/                    # demo / 测试脚本
+├── examples/                   # 示例代码与 workflow YAML
+└── docs/                       # 文档
+```
+
+## 当前状态
+
+更准确地说，当前项目已经进入“统一 execution 平台收口阶段”，不是继续扩 DSL 的阶段。
+
+当前更适合做的是：
+
+- 用统一 execution API 接入真实场景
+- 补接入文档和演示脚本
+- 观察 recovery / SSE / execution 视图是否满足上层使用
+
+而不是继续优先扩展 workflow 高阶语义。

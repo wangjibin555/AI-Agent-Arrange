@@ -59,7 +59,7 @@ configs/
 ├───────────────┼─────────────────┼──────────────────────────┤
 │ milvus        │ 向量数据库      │ 语义搜索、记忆检索       │
 ├───────────────┼─────────────────┼──────────────────────────┤
-│ llm.providers │ 大模型配置      │ OpenAI、Claude、通义千问 │
+│ llm.providers │ 大模型配置      │ OpenAI、DeepSeek、Claude、通义千问 │
 └───────────────┴─────────────────┴──────────────────────────┘
 
 使用场景：
@@ -100,16 +100,18 @@ Type 2: llm（AI Agent）
 
 - name: "data_analyst"          # Agent 名称
   type: "llm"                   # 类型：调用大模型
-  llm_provider: "openai"        # 使用 OpenAI（从 config.yaml 读配置）
+  llm_provider: "deepseek"      # 使用 DeepSeek / OpenAI（从 config.yaml 读配置）
   capabilities:
-    - "data_analysis"
-    - "trend_analysis"
+    - "text-analysis"
+    - "summarization"
+    - "translation"
+    - "complex-reasoning"
 
 运行机制：
 // 当任务分配给 data_analyst 时
 agent := registry.Get("data_analyst")
-// 内部会调用 OpenAI API
-response := openai.Generate(
+// 内部会调用对应的大模型 API
+response := llm.Generate(
 prompt="分析这个数据: " + input.Data
 )
 
@@ -147,15 +149,15 @@ result := tool.Execute(map[string]interface{}{
 2. 编排引擎查看 agents.yaml
    → 找到 "data_analyst" (LLM Agent)
    ↓
-3. data_analyst 从 config.yaml 获取 OpenAI API 配置
-   → 调用 GPT-4 分析数据
+3. data_analyst 从 config.yaml 获取 DeepSeek / OpenAI API 配置
+   → 调用对应模型分析数据
    ↓
 4. 分析过程中需要获取网站数据
    → 查看 tools.yaml，找到 "http_request" 工具
    → 调用 http_request 工具抓取数据
    ↓
 5. 分析完成后，调用 "report_generator" Agent
-   → 使用 Claude API（从 config.yaml 读取）
+   → 使用对应 LLM API（从 config.yaml 读取）
    → 生成报告文档
    ↓
 6. 结果保存到 MySQL (config.yaml 配置)

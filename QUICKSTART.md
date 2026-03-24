@@ -65,6 +65,87 @@ docker ps
 
 访问 http://localhost:8080 应该看到服务正在运行。
 
+也可以直接验证健康检查：
+
+```bash
+curl http://localhost:8080/health
+```
+
+## 🚀 最小演示
+
+当前推荐先从统一 `execution` 模型开始体验，而不是分别只看 task / workflow。
+
+### 推荐 Agent 选择
+
+- `echo-agent-*`：先验证服务是否通、SSE 是否通、execution 是否通
+- `deepseek-chat-agent`：默认用于问答、总结、翻译、分析、推理这类通用任务
+- `openai-gpt-agent`：更适合代码生成、代码审查、调试和复杂工程推理
+
+如果你只是想最快看到一个像样的 AI 输出，优先选 `deepseek-chat-agent`。
+
+### 1. 运行统一 execution demo
+
+```bash
+./scripts/demo_unified_execution.sh
+```
+
+这个 demo 会自动演示：
+
+- 创建一个 `task`
+- 创建一个 `workflow`
+- 通过 `GET /api/v1/executions/:id` 轮询结果
+- 通过 `GET /api/v1/executions/:id/stream` 查看 SSE
+
+如果你想手动验证 DeepSeek 的复杂文本能力，建议创建：
+
+- `action = "analyze"`：测试分析能力
+- `action = "translate"`：测试翻译能力
+- `action = "summarize"`：测试总结能力
+- `action = "reason"` 或 `action = "plan"`：测试推理/规划能力
+
+### 2. 如果服务地址不是默认值
+
+```bash
+SERVER_URL=http://127.0.0.1:8080 ./scripts/demo_unified_execution.sh
+```
+
+### 3. 可选 recovery 检查
+
+如果你手里已经有一个旧 execution ID，想看它是否被恢复链路接管：
+
+```bash
+RECOVERY_EXECUTION_ID=<execution-id> ./scripts/demo_unified_execution.sh
+```
+
+## 🌐 推荐 API 入口
+
+### 创建入口
+
+- 单任务：`POST /api/v1/tasks`
+- 工作流：`POST /api/v1/workflows/execute`
+
+### 统一跟踪入口
+
+- 查询：`GET /api/v1/executions/:id`
+- 取消：`DELETE /api/v1/executions/:id`
+- SSE：`GET /api/v1/executions/:id/stream`
+
+workflow execution 还可能带：
+
+- `recovery_status`
+- `superseded_by_execution_id`
+
+当旧 execution 返回：
+
+```json
+{
+  "recovery_status": "superseded",
+  "superseded_by_execution_id": "new-execution-id"
+}
+```
+
+说明客户端应切换去跟踪新的 execution ID。
+
 ## 📁 项目结构
 
 ```
@@ -190,8 +271,9 @@ docker-compose -f deployments/docker-compose-minimal.yml --env-file .env config
 ## 📚 下一步
 
 - [环境变量配置详解](docs/ENV_CONFIG.md)
-- [Agent 开发指南](docs/AGENT_DEVELOPMENT.md)（待创建）
-- [API 文档](docs/API.md)（待创建）
+- [统一 execution 接入说明](docs/api/UNIFIED_EXECUTION_INTEGRATION_GUIDE.md)
+- [统一 execution API 使用指南](docs/api/UNIFIED_EXECUTION_API_GUIDE.md)
+- [文档总览](docs/README.md)
 
 ## 🆘 获取帮助
 

@@ -23,6 +23,7 @@ type StreamingEngine struct {
 type agentEventPublisherAdapter struct {
 	workflowPublisher EventPublisher
 	executionID       string
+	stepID            string
 }
 
 // PublishTaskEvent 实现agent.EventPublisher接口
@@ -36,6 +37,9 @@ func (a *agentEventPublisherAdapter) PublishTaskEvent(taskID string, eventType s
 		data["error"] = errorMsg
 	}
 	data["task_id"] = taskID
+	if a.stepID != "" {
+		data["step_id"] = a.stepID
+	}
 
 	a.workflowPublisher.PublishWorkflowEvent(a.executionID, eventType, status, message, data)
 }
@@ -494,6 +498,7 @@ func (e *StreamingEngine) executeStepStreaming(ctx context.Context, step *Step, 
 			taskInput.EventPublisher = &agentEventPublisherAdapter{
 				workflowPublisher: e.eventPublisher,
 				executionID:       execution.ID,
+				stepID:            step.ID,
 			}
 		}
 
@@ -709,6 +714,7 @@ func (e *StreamingEngine) executeStepStreamingFallback(
 		taskInput.EventPublisher = &agentEventPublisherAdapter{
 			workflowPublisher: e.eventPublisher,
 			executionID:       execution.ID,
+			stepID:            step.ID,
 		}
 	}
 
@@ -798,6 +804,26 @@ func (e *StreamingEngine) waitForDependenciesCompletion(
 	}
 }
 
+func (e *StreamingEngine) seedUpstreamFinalOutput(execution *WorkflowExecution, depID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if execution.Context.Outputs[depID] != nil && len(execution.Context.Outputs[depID]) > 0 {
+		return true
+	}
+
+	stepExec := execution.StepExecutions[depID]
+	if stepExec == nil || stepExec.Status != WorkflowStatusCompleted || len(stepExec.Result) == 0 {
+		return false
+	}
+
+	execution.Context.Outputs[depID] = make(map[string]interface{}, len(stepExec.Result))
+	for k, v := range stepExec.Result {
+		execution.Context.Outputs[depID][k] = v
+	}
+	return true
+}
+
 // subscribeToUpstream 订阅上游流式数据，等待初始数据到达后返回
 func (e *StreamingEngine) subscribeToUpstream(ctx context.Context, step *Step, execution *WorkflowExecution, buffer *StreamBuffer) error {
 	if len(step.DependsOn) == 0 {
@@ -808,8 +834,21 @@ func (e *StreamingEngine) subscribeToUpstream(ctx context.Context, step *Step, e
 	initialDataChannels := make(map[string]chan struct{})
 
 	for _, depID := range step.DependsOn {
+		initialDataChan := make(chan struct{}, 1)
+		initialDataChannels[depID] = initialDataChan
+
 		depBuffer := e.getBuffer(execution.ID, depID)
 		if depBuffer == nil {
+			if e.seedUpstreamFinalOutput(execution, depID) {
+				e.notifyExecutionContextChange(execution)
+				initialDataChan <- struct{}{}
+			}
+			continue
+		}
+
+		if depBuffer.TotalChunks() == 0 && depBuffer.IsCompleted() && e.seedUpstreamFinalOutput(execution, depID) {
+			e.notifyExecutionContextChange(execution)
+			initialDataChan <- struct{}{}
 			continue
 		}
 
@@ -820,10 +859,6 @@ func (e *StreamingEngine) subscribeToUpstream(ctx context.Context, step *Step, e
 		}
 
 		subscriber := depBuffer.Subscribe(step.ID, minTokens)
-
-		// 创建初始数据通知channel
-		initialDataChan := make(chan struct{}, 1)
-		initialDataChannels[depID] = initialDataChan
 
 		// 启动协程处理流式输入
 		go func(sub *StreamSubscriber, depStepID string, notifyChan chan struct{}) {

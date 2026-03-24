@@ -261,6 +261,11 @@ func (tm *TaskManager) WaitForTask(ctx context.Context) error {
 	}
 }
 
+// GetRegistry returns the underlying agent registry.
+func (tm *TaskManager) GetRegistry() *agent.Registry {
+	return tm.registry
+}
+
 // selectAgentForTask selects the best agent for a task based on capability and load balancing
 func (tm *TaskManager) selectAgentForTask(task *Task) (agent.Agent, error) {
 	// 情况1: 任务已经指定了 Agent，直接返回
@@ -335,11 +340,14 @@ func inferCapabilityFromAction(action string) string {
 	actionCapabilityMap := map[string]string{
 		// 文本处理
 		"translate": "translation",
-		"summarize": "text-generation",
+		"summarize": "summarization",
 		"generate":  "text-generation",
 		"analyze":   "text-analysis",
 		"chat":      "conversation",
 		"qa":        "question-answering",
+		"reason":    "complex-reasoning",
+		"plan":      "complex-reasoning",
+		"research":  "web-search",
 
 		// 数据操作
 		"query":  "database",

@@ -105,6 +105,11 @@ func (s *Server) setupRoutes() {
 			workflows.POST("/execute", s.handleExecuteWorkflow)
 		}
 
+		agents := v1.Group("/agents")
+		{
+			agents.GET("", s.handleListAgents)
+		}
+
 		// Smart task with auto agent selection
 		v1.POST("/smart-task", s.handleCreateSmartTask)
 

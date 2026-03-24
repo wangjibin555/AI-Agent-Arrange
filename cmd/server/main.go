@@ -253,7 +253,7 @@ func registerAgents(registry *agent.Registry, toolRegistry *tool.Registry) error
 		// 不中断启动，允许没有 OpenAI API Key 的情况
 	}
 
-	// 3. Register DeepSeek Agent (for lightweight tasks) with global tool registry
+	// 3. Register DeepSeek Agent (for general-purpose tasks) with global tool registry
 	if err := registerDeepSeekAgents(registry, toolRegistry); err != nil {
 		logger.Warn("Failed to register DeepSeek agents", zap.Error(err))
 		// 不中断启动，允许没有 DeepSeek API Key 的情况
@@ -372,7 +372,7 @@ func registerOpenAIAgents(registry *agent.Registry, toolRegistry *tool.Registry)
 	return nil
 }
 
-// registerDeepSeekAgents registers DeepSeek agents for lightweight tasks
+// registerDeepSeekAgents registers DeepSeek agents for general-purpose LLM tasks
 func registerDeepSeekAgents(registry *agent.Registry, toolRegistry *tool.Registry) error {
 	apiKey := os.Getenv("DEEPSEEK_API_KEY")
 	if apiKey == "" || apiKey == "your-deepseek-api-key-here" {
@@ -394,18 +394,23 @@ func registerDeepSeekAgents(registry *agent.Registry, toolRegistry *tool.Registr
 	config := &agent.Config{
 		Name:        "deepseek-chat-agent",
 		Type:        "deepseek",
-		Description: "DeepSeek agent for lightweight tasks: Q&A, summarization, knowledge",
+		Description: "DeepSeek agent for general-purpose tasks: Q&A, analysis, translation, reasoning",
 		Capabilities: []string{
 			"question-answering",
 			"summarization",
 			"knowledge-extraction",
 			"text-generation",
 			"conversation",
+			"translation",
+			"text-analysis",
+			"complex-reasoning",
+			"web-search",
+			"function-calling",
 		},
 		Settings: map[string]interface{}{
 			"model":       model,
 			"temperature": 0.7,
-			"max_tokens":  2000,
+			"max_tokens":  4000,
 		},
 	}
 

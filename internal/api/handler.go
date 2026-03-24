@@ -47,6 +47,13 @@ type TaskResponse struct {
 	CompletedAt        *time.Time             `json:"completed_at,omitempty"`
 }
 
+// AgentView represents one registered agent for frontend discovery.
+type AgentView struct {
+	Name         string   `json:"name"`
+	Description  string   `json:"description"`
+	Capabilities []string `json:"capabilities"`
+}
+
 // ExecuteWorkflowRequest represents the request body for executing a workflow.
 type ExecuteWorkflowRequest struct {
 	Workflow  *workflow.Workflow     `json:"workflow" binding:"required"`
@@ -95,6 +102,28 @@ func (s *Server) handleEngineStatus(c *gin.Context) {
 				"limits": limits,
 				"usage":  usage,
 			},
+		},
+	})
+}
+
+// handleListAgents returns registered agents for frontend discovery.
+func (s *Server) handleListAgents(c *gin.Context) {
+	registered := s.engine.GetTaskManager().GetRegistry().GetAll()
+	agents := make([]AgentView, 0, len(registered))
+
+	for _, ag := range registered {
+		agents = append(agents, AgentView{
+			Name:         ag.GetName(),
+			Description:  ag.GetDescription(),
+			Capabilities: ag.GetCapabilities(),
+		})
+	}
+
+	c.JSON(http.StatusOK, Response{
+		Success: true,
+		Data: gin.H{
+			"agents": agents,
+			"count":  len(agents),
 		},
 	})
 }
@@ -559,9 +588,10 @@ func (s *Server) handleExecutionEventStream(c *gin.Context) {
 			fmt.Fprint(c.Writer, FormatSSE(event))
 			c.Writer.Flush()
 
-			if event.Status == string(orchestrator.ExecutionStatusCompleted) ||
-				event.Status == string(orchestrator.ExecutionStatusFailed) ||
-				event.Status == string(orchestrator.ExecutionStatusCancelled) {
+			if (event.ExecutionType == string(orchestrator.ExecutionTypeTask) &&
+				(event.Type == "completed" || event.Type == "failed" || event.Type == "cancelled")) ||
+				(event.ExecutionType == string(orchestrator.ExecutionTypeWorkflow) &&
+					event.Type == "workflow_completed") {
 				return
 			}
 
