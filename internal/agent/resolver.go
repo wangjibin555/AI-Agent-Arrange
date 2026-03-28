@@ -2,17 +2,17 @@ package agent
 
 import "fmt"
 
-// CandidateSelector picks one agent from a resolved candidate set.
+// CandidateSelector 用于从候选 Agent 集合中挑选最终执行者。
 type CandidateSelector func([]Agent) (Agent, error)
 
-// ResolveRequest describes one agent resolution attempt.
+// ResolveRequest 描述一次 Agent 解析请求。
 type ResolveRequest struct {
 	AgentName          string
 	Capability         string
 	FallbackCapability string
 }
 
-// ResolveHooks customizes resolver behavior for different callers.
+// ResolveHooks 允许不同调用方自定义解析失败和候选选择策略。
 type ResolveHooks struct {
 	OnNamedAgentNotFound func(agentName string, cause error) error
 	OnCapabilityNotFound func(capability string) error
@@ -20,17 +20,17 @@ type ResolveHooks struct {
 	SelectCandidate      CandidateSelector
 }
 
-// Resolver centralizes agent/capability based selection.
+// Resolver 封装基于 Agent 名称或能力的统一选择逻辑。
 type Resolver struct {
 	registry *Registry
 }
 
-// NewResolver creates a resolver over one registry.
+// NewResolver 基于一个注册中心创建 Resolver。
 func NewResolver(registry *Registry) *Resolver {
 	return &Resolver{registry: registry}
 }
 
-// Resolve returns one concrete agent using direct name, capability, or fallback capability.
+// Resolve 按“显式名称 -> 指定能力 -> 兜底能力”的顺序解析出具体 Agent。
 func (r *Resolver) Resolve(req ResolveRequest, hooks ResolveHooks) (Agent, error) {
 	if r == nil || r.registry == nil {
 		return nil, fmt.Errorf("agent registry is not configured")

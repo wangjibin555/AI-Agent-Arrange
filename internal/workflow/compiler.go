@@ -6,6 +6,7 @@ import (
 	"strings"
 )
 
+// BindingSourceKind 表示数据绑定引用的来源类型。
 type BindingSourceKind string
 
 const (
@@ -14,6 +15,8 @@ const (
 	BindingSourceLiteral  BindingSourceKind = "literal"
 )
 
+// DataBinding 描述一步编译后提取出的数据依赖关系。
+// 它把模板表达式拆成“目标字段 <- 来源步骤/变量”的结构，便于校验和建图。
 type DataBinding struct {
 	TargetPath   string            `json:"target_path"`
 	Expression   string            `json:"expression"`
@@ -23,6 +26,8 @@ type DataBinding struct {
 	Template     bool              `json:"template"`
 }
 
+// CompiledWorkflow 表示对静态 Workflow 做完预处理后的运行计划。
+// 编译阶段会补默认值、提取绑定关系、展开边信息，并生成更适合调度的数据结构。
 type CompiledWorkflow struct {
 	ID        string                    `json:"id"`
 	Name      string                    `json:"name"`
@@ -36,6 +41,7 @@ type CompiledWorkflow struct {
 	DAG       *DAG                      `json:"-"`
 }
 
+// CompiledStep 表示带运行时元信息的步骤定义。
 type CompiledStep struct {
 	ID                string        `json:"id"`
 	Runtime           *Step         `json:"runtime"`
@@ -44,6 +50,7 @@ type CompiledStep struct {
 	ReferencedStepIDs []string      `json:"referenced_step_ids,omitempty"`
 }
 
+// CompiledEdgeKind 表示编译后边的语义类型。
 type CompiledEdgeKind string
 
 const (
@@ -52,6 +59,8 @@ const (
 	CompiledEdgeForeach    CompiledEdgeKind = "foreach"
 )
 
+// CompiledEdge 表示步骤之间的一条运行时边。
+// 除了普通依赖，还会显式记录 route 和 foreach 引出的额外关系。
 type CompiledEdge struct {
 	FromStepID    string           `json:"from_step_id"`
 	ToStepID      string           `json:"to_step_id"`
@@ -61,16 +70,20 @@ type CompiledEdge struct {
 	BindingTarget string           `json:"binding_target,omitempty"`
 }
 
+// Compiler 负责把 Workflow 编译成运行时可直接消费的 CompiledWorkflow。
 type Compiler struct{}
 
+// NewCompiler 创建工作流编译器。
 func NewCompiler() *Compiler {
 	return &Compiler{}
 }
 
+// CompileWorkflow 是工作流编译的便捷入口。
 func CompileWorkflow(workflow *Workflow) (*CompiledWorkflow, error) {
 	return NewCompiler().Compile(workflow)
 }
 
+// Compile 执行编译流程：校验定义、归一化步骤、提取绑定、构建边和 DAG。
 func (c *Compiler) Compile(workflow *Workflow) (*CompiledWorkflow, error) {
 	if workflow != nil && workflow.Name == "" && workflow.ID != "" {
 		workflow.Name = workflow.ID
@@ -90,6 +103,7 @@ func (c *Compiler) Compile(workflow *Workflow) (*CompiledWorkflow, error) {
 		Outgoing:  make(map[string][]CompiledEdge),
 	}
 
+	// 归一化每个步骤，把默认值和绑定引用都提前整理好，降低运行期判断复杂度。
 	runtimeSteps := make([]*Step, 0, len(workflow.Steps))
 	for _, step := range workflow.Steps {
 		runtimeStep, defaulted := normalizeCompiledStep(step)
@@ -149,6 +163,7 @@ func (c *Compiler) Compile(workflow *Workflow) (*CompiledWorkflow, error) {
 	return compiled, nil
 }
 
+// buildEdges 根据 depends_on、route、foreach 等语义构建统一边集合。
 func (w *CompiledWorkflow) buildEdges() {
 	if w == nil {
 		return
@@ -208,12 +223,15 @@ func (w *CompiledWorkflow) buildEdges() {
 	}
 }
 
+// addEdge 把边同时写入全量列表、入边索引和出边索引。
 func (w *CompiledWorkflow) addEdge(edge CompiledEdge) {
 	w.Edges = append(w.Edges, edge)
 	w.Incoming[edge.ToStepID] = append(w.Incoming[edge.ToStepID], edge)
 	w.Outgoing[edge.FromStepID] = append(w.Outgoing[edge.FromStepID], edge)
 }
 
+// validateCompiledStepReferences 校验编译后的步骤引用是否合法。
+// 重点确保模板引用的上游步骤已经在 depends_on 中显式声明。
 func validateCompiledStepReferences(step *CompiledStep) error {
 	if step == nil || step.Runtime == nil {
 		return nil
@@ -250,6 +268,8 @@ func validateCompiledStepReferences(step *CompiledStep) error {
 	return nil
 }
 
+// normalizeCompiledStep 复制步骤定义，并补充编译期默认值。
+// 这样运行时只需消费规范化后的 Step，避免重复兜底。
 func normalizeCompiledStep(step *Step) (*Step, []string) {
 	runtime := &Step{
 		ID:                 step.ID,
@@ -320,6 +340,7 @@ func normalizeCompiledStep(step *Step) (*Step, []string) {
 	return runtime, defaulted
 }
 
+// collectStepBindings 收集步骤中所有可能引用外部数据的表达式。
 func collectStepBindings(step *Step) []DataBinding {
 	if step == nil {
 		return nil
@@ -343,6 +364,7 @@ func collectStepBindings(step *Step) []DataBinding {
 	return bindings
 }
 
+// collectBindingsFromValue 递归扫描 map / slice / string，提取模板绑定。
 func collectBindingsFromValue(prefix string, value interface{}) []DataBinding {
 	switch current := value.(type) {
 	case map[string]interface{}:
@@ -373,6 +395,7 @@ func collectBindingsFromValue(prefix string, value interface{}) []DataBinding {
 	}
 }
 
+// parseBindingExpressions 从单个字符串里提取一到多个绑定表达式。
 func parseBindingExpressions(targetPath string, raw string) []DataBinding {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -399,6 +422,7 @@ func parseBindingExpressions(targetPath string, raw string) []DataBinding {
 	return nil
 }
 
+// classifyBinding 判断一个表达式引用的是变量、步骤输出还是字面量。
 func classifyBinding(targetPath, expression string) DataBinding {
 	binding := DataBinding{
 		TargetPath: targetPath,
@@ -435,6 +459,7 @@ func classifyBinding(targetPath, expression string) DataBinding {
 	return binding
 }
 
+// looksLikeBindingReference 用较宽松的规则识别“像引用”的字符串。
 func looksLikeBindingReference(raw string) bool {
 	if strings.ContainsAny(raw, " <>!=()+-*/\"'") {
 		return false

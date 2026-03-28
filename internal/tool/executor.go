@@ -9,15 +9,15 @@ import (
 	"github.com/wangjibin555/AI-Agent-Arrange/internal/monitor"
 )
 
-// ExecutionConfig holds configuration for tool execution
+// ExecutionConfig 定义工具执行器的运行配置。
 type ExecutionConfig struct {
 	Timeout      time.Duration
 	MaxRetries   int
 	RetryDelay   time.Duration
-	RetryBackoff float64 // Exponential backoff multiplier (e.g., 2.0)
+	RetryBackoff float64 // 指数退避倍率，例如 2.0
 }
 
-// DefaultExecutionConfig returns sensible defaults
+// DefaultExecutionConfig 返回一组通用默认配置。
 func DefaultExecutionConfig() *ExecutionConfig {
 	return &ExecutionConfig{
 		Timeout:      30 * time.Second,
@@ -27,14 +27,15 @@ func DefaultExecutionConfig() *ExecutionConfig {
 	}
 }
 
-// Executor handles safe tool execution with timeout, retry, and error handling
+// Executor 负责安全执行工具调用。
+// 它统一处理参数校验、超时控制、重试策略、panic 保护和指标上报。
 type Executor struct {
 	registry *Registry
 	config   *ExecutionConfig
 	metrics  *monitor.ToolMetrics
 }
 
-// NewExecutor creates a new tool executor
+// NewExecutor 创建工具执行器。
 func NewExecutor(registry *Registry, config *ExecutionConfig) *Executor {
 	if config == nil {
 		config = DefaultExecutionConfig()
@@ -49,39 +50,39 @@ func (e *Executor) SetMetrics(metrics *monitor.ToolMetrics) {
 	e.metrics = metrics
 }
 
-// Execute executes a tool with full error handling, timeout, and retry logic
+// Execute 执行一次工具调用，并统一处理超时、重试和错误包装。
 func (e *Executor) Execute(ctx context.Context, toolName string, params map[string]interface{}) (*Result, error) {
 	start := time.Now()
 	e.observeToolStarted(toolName)
 
-	// Get tool from registry
+	// 先从注册中心解析工具实例。
 	toolInstance, err := e.registry.Get(toolName)
 	if err != nil {
 		e.observeToolFinished(toolName, "not_found", start)
 		return nil, ErrToolNotFound(toolName)
 	}
 
-	// Validate parameters against schema
+	// 再按工具 schema 校验参数。
 	if err := e.validateParams(toolInstance, params); err != nil {
 		e.observeToolValidationFailed(toolName)
 		e.observeToolFinished(toolName, "validation_failed", start)
 		return nil, err
 	}
 
-	// Execute with retry logic
+	// 最后在统一的重试框架中执行工具。
 	var lastErr error
 	retryDelay := e.config.RetryDelay
 
 	for attempt := 0; attempt <= e.config.MaxRetries; attempt++ {
-		// Add timeout to context
+		// 为本次尝试附加独立超时控制。
 		execCtx, cancel := context.WithTimeout(ctx, e.config.Timeout)
 
-		// Execute with timeout
+		// 将真实工具调用放到 goroutine 中，便于同时监听结果和超时。
 		resultChan := make(chan *Result, 1)
 		errChan := make(chan error, 1)
 
 		go func() {
-			// Panic recovery to prevent tool panics from crashing the agent
+			// 拦截工具 panic，避免异常直接打崩调用方。
 			defer func() {
 				if r := recover(); r != nil {
 					e.observeToolPanic(toolName)
@@ -101,7 +102,7 @@ func (e *Executor) Execute(ctx context.Context, toolName string, params map[stri
 			}
 		}()
 
-		// Wait for result or timeout
+		// 等待结果、错误或超时信号。
 		select {
 		case <-execCtx.Done():
 			cancel()
@@ -120,23 +121,23 @@ func (e *Executor) Execute(ctx context.Context, toolName string, params map[stri
 				lastErr = ErrExecutionFailed(toolName, result.Error, nil)
 			} else {
 				e.observeToolFinished(toolName, "success", start)
-				return result, nil // Success!
+				return result, nil // 成功返回
 			}
 		}
 
-		// Check if error is retryable
+		// 只有可重试错误才继续下一轮尝试。
 		if !IsRetryable(lastErr) {
-			break // Don't retry non-retryable errors
+			break // 非可重试错误直接结束
 		}
 		e.observeToolRetry(toolName, retryReason(lastErr))
 
-		// Don't sleep after last attempt
+		// 最后一轮失败后不再等待。
 		if attempt < e.config.MaxRetries {
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-time.After(retryDelay):
-				// Exponential backoff
+				// 使用指数退避降低连续失败时的冲击。
 				retryDelay = time.Duration(float64(retryDelay) * e.config.RetryBackoff)
 			}
 		}
@@ -146,14 +147,14 @@ func (e *Executor) Execute(ctx context.Context, toolName string, params map[stri
 	return nil, lastErr
 }
 
-// validateParams validates parameters against tool schema
+// validateParams 按工具 schema 校验请求参数。
 func (e *Executor) validateParams(tool Tool, params map[string]interface{}) error {
 	def := tool.GetDefinition()
 	if def == nil || def.Parameters == nil {
-		return nil // No validation needed
+		return nil // 没有 schema 时跳过校验
 	}
 
-	// Check required parameters
+	// 先检查必填参数。
 	for _, required := range def.Parameters.Required {
 		if _, exists := params[required]; !exists {
 			return ErrInvalidParams(
@@ -163,7 +164,7 @@ func (e *Executor) validateParams(tool Tool, params map[string]interface{}) erro
 		}
 	}
 
-	// Validate parameter types
+	// 再检查每个参数是否存在于 schema 且类型正确。
 	for key, value := range params {
 		propSchema, exists := def.Parameters.Properties[key]
 		if !exists {
@@ -181,11 +182,11 @@ func (e *Executor) validateParams(tool Tool, params map[string]interface{}) erro
 	return nil
 }
 
-// validateType validates a parameter value against its schema type
+// validateType 校验单个参数值是否符合 schema 定义的类型。
 func (e *Executor) validateType(toolName, paramName string, value interface{}, schema *PropertySchema) error {
 	actualType := getJSONType(value)
 
-	// Handle special cases
+	// 针对 integer/number 做一层兼容处理。
 	if schema.Type == "integer" && actualType == "number" {
 		if _, ok := value.(int); ok {
 			return nil
@@ -207,7 +208,7 @@ func (e *Executor) validateType(toolName, paramName string, value interface{}, s
 			WithDetails("actual_type", actualType)
 	}
 
-	// Validate enum values
+	// 如果声明了枚举值，还需要额外校验取值是否合法。
 	if len(schema.Enum) > 0 {
 		strVal, ok := value.(string)
 		if !ok {

@@ -1,6 +1,6 @@
 package api
 
-// Response represents the standard JSON envelope used by the HTTP API.
+// Response 表示 HTTP API 统一使用的 JSON 响应包裹结构。
 type Response struct {
 	Success   bool           `json:"success"`
 	Data      interface{}    `json:"data,omitempty"`

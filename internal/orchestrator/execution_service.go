@@ -39,7 +39,7 @@ type ExecutionHandle struct {
 	Type ExecutionType `json:"type"`
 }
 
-// ExecutionStepView is the unified step detail view.
+// 具体执行上层对象收口的节点对象
 type ExecutionStepView struct {
 	ID          string                 `json:"id"`
 	Status      UnifiedExecutionStatus `json:"status"`
@@ -50,7 +50,7 @@ type ExecutionStepView struct {
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
 }
 
-// ExecutionView is the platform-facing execution view.
+// 一次执行的上下文，可能是工作流，也可能是Task任务，收口在这里
 type ExecutionView struct {
 	ID                      string                 `json:"id"`
 	Type                    ExecutionType          `json:"type"`
@@ -64,7 +64,7 @@ type ExecutionView struct {
 	Steps                   []ExecutionStepView    `json:"steps,omitempty"`
 }
 
-// TaskExecutionRequest is the unified task execution request.
+// 统一任务节点执行请求
 type TaskExecutionRequest struct {
 	ID         string
 	AgentName  string
@@ -75,7 +75,7 @@ type TaskExecutionRequest struct {
 	Priority   int
 }
 
-// WorkflowExecutionRequest is the unified workflow execution request.
+// 统一工作流执行请求
 type WorkflowExecutionRequest struct {
 	Workflow  *workflow.Workflow
 	Variables map[string]interface{}

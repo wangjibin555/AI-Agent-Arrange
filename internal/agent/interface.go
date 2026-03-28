@@ -5,51 +5,52 @@ import (
 	"time"
 )
 
-// Agent represents the core interface that all agents must implement
+// Agent 定义所有 Agent 必须实现的核心接口。
 type Agent interface {
-	// GetName returns the unique name of the agent
+	// GetName 返回 Agent 的唯一名称。
 	GetName() string
 
-	// GetDescription returns the description of what the agent does
+	// GetDescription 返回 Agent 的职责描述。
 	GetDescription() string
 
-	// GetCapabilities returns a list of capabilities this agent supports
+	// GetCapabilities 返回 Agent 支持的能力列表。
 	GetCapabilities() []string
 
-	// Execute executes a task with the given input
+	// Execute 执行一次任务。
 	Execute(ctx context.Context, input *TaskInput) (*TaskOutput, error)
 
-	// Init initializes the agent with configuration
+	// Init 使用配置初始化 Agent。
 	Init(config *Config) error
 
-	// Shutdown gracefully shuts down the agent
+	// Shutdown 优雅关闭 Agent。
 	Shutdown() error
 }
 
-// ActionContract describes weak input/output requirements for a specific agent action.
+// ActionContract 描述某个 Agent Action 的弱输入/输出契约。
 type ActionContract struct {
 	InputRequired  []string `json:"input_required,omitempty"`
 	OutputRequired []string `json:"output_required,omitempty"`
 }
 
-// ActionContractProvider is an optional interface for agents that can describe action contracts.
+// ActionContractProvider 是可选接口，用于让 Agent 暴露 action 契约信息。
 type ActionContractProvider interface {
 	GetActionContract(action string) (*ActionContract, bool)
 }
 
-// TaskInput represents the input data for an agent task
+// TaskInput 表示一次 Agent 任务的输入数据。
+// 它同时承载静态参数、运行时上下文访问能力以及事件回调句柄。
 type TaskInput struct {
 	TaskID         string                             `json:"task_id"`
 	Action         string                             `json:"action"`
 	Parameters     map[string]interface{}             `json:"parameters"` // 静态参数（启动时渲染）
 	Context        map[string]interface{}             `json:"context"`    // 遗留字段
 	ParentTaskID   string                             `json:"parent_task_id,omitempty"`
-	EventPublisher EventPublisher                     `json:"-"` // For streaming token events
-	StreamCallback func(chunk map[string]interface{}) `json:"-"` // For workflow streaming
-	ContextReader  ContextReader                      `json:"-"` // For dynamic context access (thread-safe)
+	EventPublisher EventPublisher                     `json:"-"` // 用于发布流式 token、进度等事件
+	StreamCallback func(chunk map[string]interface{}) `json:"-"` // 工作流流式步骤的 chunk 回调
+	ContextReader  ContextReader                      `json:"-"` // 线程安全的动态上下文读取器
 }
 
-// EventPublisher defines the interface for publishing task events (token streaming, progress, etc.)
+// EventPublisher 定义任务事件发布接口，例如 token 流、进度和状态变化。
 type EventPublisher interface {
 	PublishTaskEvent(taskID string, eventType string, status string, message string, result map[string]interface{}, errorMsg string)
 }
@@ -76,7 +77,7 @@ type ContextReader interface {
 	IsStepCompleted(stepID string) bool
 }
 
-// TaskOutput represents the output from an agent task
+// TaskOutput 表示 Agent 任务执行后的输出。
 type TaskOutput struct {
 	TaskID   string                 `json:"task_id"`
 	Success  bool                   `json:"success"`
@@ -85,7 +86,7 @@ type TaskOutput struct {
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
-// Config holds agent configuration
+// Config 表示 Agent 初始化配置。
 type Config struct {
 	Name         string                 `yaml:"name"`
 	Type         string                 `yaml:"type"`
@@ -95,7 +96,7 @@ type Config struct {
 	Settings     map[string]interface{} `yaml:"settings,omitempty"`
 }
 
-// Status represents the current status of an agent
+// Status 表示 Agent 当前状态。
 type Status int
 
 const (

@@ -2,7 +2,8 @@ package orchestrator
 
 import "time"
 
-// Task represents a unit of work to be executed by an agent
+// Task 表示调度器中的一个最小执行单元。
+// 它描述了“由哪个 Agent 以什么参数执行什么动作”，并承载完整的生命周期状态。
 type Task struct {
 	ID                 string                 `json:"id"`                            // 任务唯一标识符（UUID）
 	AgentName          string                 `json:"agent_name"`                    // 执行任务的 Agent 名称（可在创建时指定，否则自动选择）
@@ -22,7 +23,7 @@ type Task struct {
 	CompletedAt        *time.Time             `json:"completed_at,omitempty"`        // 任务完成时间（成功或失败）
 }
 
-// TaskStatus represents the status of a task
+// TaskStatus 表示任务在调度生命周期中的状态。
 type TaskStatus string
 
 const (
@@ -33,7 +34,8 @@ const (
 	TaskStatusCancelled TaskStatus = "cancelled"
 )
 
-// Workflow represents a collection of tasks with dependencies
+// Workflow 表示一组带依赖关系的任务集合。
+// 当前编排器层的 Workflow 结构较轻量，主要用于表达任务聚合关系。
 type Workflow struct {
 	ID          string     `json:"id"`
 	Name        string     `json:"name"`

@@ -5,21 +5,22 @@ import (
 	"sort"
 )
 
-// DAG represents a Directed Acyclic Graph for workflow steps
+// DAG 表示工作流步骤之间的有向无环图。
+// 它只负责表达依赖关系，不处理 route、streaming 等更高层的运行时语义。
 type DAG struct {
 	nodes         map[string]*DAGNode // 当前节点对应步骤
 	adjacencyList map[string][]string // 当前节点依赖的步骤ID列表
 }
 
-// DAGNode represents a node in the DAG
+// DAGNode 表示 DAG 中的一个节点。
 type DAGNode struct {
 	StepID       string
 	Step         *Step
-	Dependencies []string // List of step IDs this node depends on
-	Dependents   []string // List of step IDs that depend on this node
+	Dependencies []string // 当前节点依赖的步骤 ID 列表
+	Dependents   []string // 依赖当前节点的步骤 ID 列表
 }
 
-// NewDAG creates a new DAG from workflow steps
+// NewDAG 根据步骤列表构建 DAG，并校验依赖和环路。
 func NewDAG(steps []*Step) (*DAG, error) {
 	dag := &DAG{
 		nodes:         make(map[string]*DAGNode),
@@ -67,7 +68,7 @@ func NewDAG(steps []*Step) (*DAG, error) {
 	return dag, nil
 }
 
-// detectCycles detects if there are any cycles in the DAG using DFS
+// detectCycles 使用 DFS 检测 DAG 中是否存在环。
 func (d *DAG) detectCycles() error {
 	visited := make(map[string]bool)
 	recStack := make(map[string]bool) // Recursion stack to track path
@@ -103,9 +104,8 @@ func (d *DAG) detectCycles() error {
 	return nil
 }
 
-// GetExecutionOrder returns steps in topological order (execution order)
-// Steps with no dependencies come first, and steps can be executed in parallel
-// if they have the same level in the DAG
+// GetExecutionOrder 返回拓扑排序后的执行层级。
+// 同一层中的步骤互不依赖，因此理论上可以并行执行。
 func (d *DAG) GetExecutionOrder() ([][]*Step, error) {
 	// Calculate in-degree for each node
 	inDegree := make(map[string]int)
@@ -162,7 +162,7 @@ func (d *DAG) GetExecutionOrder() ([][]*Step, error) {
 	return executionLevels, nil
 }
 
-// GetRootSteps returns steps with no dependencies (starting points)
+// GetRootSteps 返回没有依赖的起始步骤。
 func (d *DAG) GetRootSteps() []*Step {
 	roots := make([]*Step, 0)
 	for stepID, node := range d.nodes {
@@ -179,7 +179,7 @@ func (d *DAG) GetRootSteps() []*Step {
 	return roots
 }
 
-// GetLeafSteps returns steps with no dependents (end points)
+// GetLeafSteps 返回没有下游依赖者的结束步骤。
 func (d *DAG) GetLeafSteps() []*Step {
 	leaves := make([]*Step, 0)
 	for stepID, node := range d.nodes {
@@ -196,7 +196,7 @@ func (d *DAG) GetLeafSteps() []*Step {
 	return leaves
 }
 
-// GetStep returns a step by ID
+// GetStep 按 ID 获取步骤。
 func (d *DAG) GetStep(stepID string) (*Step, bool) {
 	node, exists := d.nodes[stepID]
 	if !exists {
@@ -205,7 +205,7 @@ func (d *DAG) GetStep(stepID string) (*Step, bool) {
 	return node.Step, true
 }
 
-// GetDependencies returns the direct dependencies of a step
+// GetDependencies 返回某个步骤的直接依赖。
 func (d *DAG) GetDependencies(stepID string) ([]*Step, error) {
 	node, exists := d.nodes[stepID]
 	if !exists {
@@ -220,7 +220,7 @@ func (d *DAG) GetDependencies(stepID string) ([]*Step, error) {
 	return deps, nil
 }
 
-// GetDependents returns steps that depend on the given step
+// GetDependents 返回直接依赖某个步骤的下游节点。
 func (d *DAG) GetDependents(stepID string) ([]*Step, error) {
 	node, exists := d.nodes[stepID]
 	if !exists {
@@ -235,7 +235,7 @@ func (d *DAG) GetDependents(stepID string) ([]*Step, error) {
 	return dependents, nil
 }
 
-// CanExecute checks if a step can be executed based on its dependencies
+// CanExecute 判断一个步骤在给定 completed 集合下是否可以执行。
 func (d *DAG) CanExecute(stepID string, completedSteps map[string]bool) bool {
 	node, exists := d.nodes[stepID]
 	if !exists {
@@ -252,7 +252,7 @@ func (d *DAG) CanExecute(stepID string, completedSteps map[string]bool) bool {
 	return true
 }
 
-// GetAllSteps returns all steps in the DAG
+// GetAllSteps 返回 DAG 中的全部步骤。
 func (d *DAG) GetAllSteps() []*Step {
 	steps := make([]*Step, 0, len(d.nodes))
 	for _, node := range d.nodes {

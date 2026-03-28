@@ -5,33 +5,33 @@ import (
 	"fmt"
 )
 
-// ErrorType represents different categories of tool execution errors
+// ErrorType 表示工具执行错误的分类。
 type ErrorType string
 
 const (
-	// ErrorTypeNotFound indicates the tool was not found in registry
+	// ErrorTypeNotFound 表示工具未在注册中心中找到。
 	ErrorTypeNotFound ErrorType = "TOOL_NOT_FOUND"
 
-	// ErrorTypeInvalidParams indicates the parameters are invalid
+	// ErrorTypeInvalidParams 表示调用参数不合法。
 	ErrorTypeInvalidParams ErrorType = "INVALID_PARAMETERS"
 
-	// ErrorTypeExecutionFailed indicates the tool execution failed
+	// ErrorTypeExecutionFailed 表示工具执行过程失败。
 	ErrorTypeExecutionFailed ErrorType = "EXECUTION_FAILED"
 
-	// ErrorTypeTimeout indicates the tool execution timed out
+	// ErrorTypeTimeout 表示工具调用超时。
 	ErrorTypeTimeout ErrorType = "TIMEOUT"
 
-	// ErrorTypePermissionDenied indicates permission issues
+	// ErrorTypePermissionDenied 表示权限不足。
 	ErrorTypePermissionDenied ErrorType = "PERMISSION_DENIED"
 
-	// ErrorTypeRateLimited indicates rate limiting
+	// ErrorTypeRateLimited 表示调用被限流。
 	ErrorTypeRateLimited ErrorType = "RATE_LIMITED"
 
-	// ErrorTypeInternalError indicates internal system errors
+	// ErrorTypeInternalError 表示系统内部错误。
 	ErrorTypeInternalError ErrorType = "INTERNAL_ERROR"
 )
 
-// ToolError represents a structured error for tool execution
+// ToolError 表示结构化的工具执行错误。
 type ToolError struct {
 	Type          ErrorType              `json:"type"`
 	Message       string                 `json:"message"`
@@ -42,7 +42,7 @@ type ToolError struct {
 	SuggestedFix  string                 `json:"suggested_fix,omitempty"`
 }
 
-// Error implements the error interface
+// Error 实现 error 接口。
 func (e *ToolError) Error() string {
 	if e.ToolName != "" {
 		return fmt.Sprintf("[%s] %s: %s", e.Type, e.ToolName, e.Message)
@@ -50,12 +50,12 @@ func (e *ToolError) Error() string {
 	return fmt.Sprintf("[%s] %s", e.Type, e.Message)
 }
 
-// Unwrap returns the original error
+// Unwrap 返回原始错误，便于 errors.Is / errors.As 继续透传。
 func (e *ToolError) Unwrap() error {
 	return e.OriginalError
 }
 
-// ToLLMMessage formats the error in a way that's helpful for LLM
+// ToLLMMessage 将错误格式化为更适合 LLM 理解和修复的文本。
 func (e *ToolError) ToLLMMessage() string {
 	msg := fmt.Sprintf("Tool execution failed: %s\n\nError Type: %s\nMessage: %s",
 		e.ToolName, e.Type, e.Message)
@@ -78,7 +78,7 @@ func (e *ToolError) ToLLMMessage() string {
 	return msg
 }
 
-// NewToolError creates a new ToolError
+// NewToolError 创建一个新的 ToolError。
 func NewToolError(errType ErrorType, toolName, message string) *ToolError {
 	return &ToolError{
 		Type:      errType,
@@ -89,13 +89,13 @@ func NewToolError(errType ErrorType, toolName, message string) *ToolError {
 	}
 }
 
-// WithOriginalError adds the original error
+// WithOriginalError 附加底层原始错误。
 func (e *ToolError) WithOriginalError(err error) *ToolError {
 	e.OriginalError = err
 	return e
 }
 
-// WithDetails adds additional details
+// WithDetails 追加结构化错误细节。
 func (e *ToolError) WithDetails(key string, value interface{}) *ToolError {
 	if e.Details == nil {
 		e.Details = make(map[string]interface{})
@@ -104,13 +104,13 @@ func (e *ToolError) WithDetails(key string, value interface{}) *ToolError {
 	return e
 }
 
-// WithSuggestedFix adds a suggestion for fixing the error
+// WithSuggestedFix 补充建议修复方式。
 func (e *ToolError) WithSuggestedFix(fix string) *ToolError {
 	e.SuggestedFix = fix
 	return e
 }
 
-// IsRetryable checks if an error is retryable
+// IsRetryable 判断一个错误是否适合重试。
 func IsRetryable(err error) bool {
 	var toolErr *ToolError
 	if errors.As(err, &toolErr) {
@@ -119,7 +119,7 @@ func IsRetryable(err error) bool {
 	return false
 }
 
-// isRetryable determines if an error type is retryable
+// isRetryable 根据错误类型判断是否允许重试。
 func isRetryable(errType ErrorType) bool {
 	switch errType {
 	case ErrorTypeTimeout, ErrorTypeRateLimited, ErrorTypeInternalError:
@@ -129,9 +129,9 @@ func isRetryable(errType ErrorType) bool {
 	}
 }
 
-// Common error constructors
+// 常用错误构造函数。
 
-// ErrToolNotFound creates a tool not found error
+// ErrToolNotFound 创建“工具不存在”错误。
 func ErrToolNotFound(toolName string) *ToolError {
 	return NewToolError(
 		ErrorTypeNotFound,
@@ -142,7 +142,7 @@ func ErrToolNotFound(toolName string) *ToolError {
 	)
 }
 
-// ErrInvalidParams creates an invalid parameters error
+// ErrInvalidParams 创建“参数非法”错误。
 func ErrInvalidParams(toolName, reason string) *ToolError {
 	return NewToolError(
 		ErrorTypeInvalidParams,
@@ -153,7 +153,7 @@ func ErrInvalidParams(toolName, reason string) *ToolError {
 	)
 }
 
-// ErrExecutionFailed creates an execution failed error
+// ErrExecutionFailed 创建“执行失败”错误。
 func ErrExecutionFailed(toolName, reason string, originalErr error) *ToolError {
 	return NewToolError(
 		ErrorTypeExecutionFailed,
@@ -162,7 +162,7 @@ func ErrExecutionFailed(toolName, reason string, originalErr error) *ToolError {
 	).WithOriginalError(originalErr)
 }
 
-// ErrTimeout creates a timeout error
+// ErrTimeout 创建“调用超时”错误。
 func ErrTimeout(toolName string, duration interface{}) *ToolError {
 	return NewToolError(
 		ErrorTypeTimeout,
@@ -172,7 +172,7 @@ func ErrTimeout(toolName string, duration interface{}) *ToolError {
 		WithSuggestedFix("Try again or increase the timeout duration")
 }
 
-// ErrRateLimited creates a rate limited error
+// ErrRateLimited 创建“限流”错误。
 func ErrRateLimited(toolName string, retryAfter interface{}) *ToolError {
 	return NewToolError(
 		ErrorTypeRateLimited,

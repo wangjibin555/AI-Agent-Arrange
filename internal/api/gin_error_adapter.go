@@ -8,7 +8,8 @@ import (
 	"github.com/wangjibin555/AI-Agent-Arrange/pkg/midware"
 )
 
-// ginErrorAdapter keeps gin-specific behavior inside the API layer.
+// ginErrorAdapter 封装 Gin 专属的错误处理和成功响应行为，
+// 避免这些框架细节渗透到更高层的业务逻辑中。
 type ginErrorAdapter struct {
 	handler  *midware.ErrorHandler
 	resolver *midware.ErrorResolver

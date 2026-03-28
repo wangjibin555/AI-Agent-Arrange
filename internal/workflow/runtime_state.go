@@ -9,7 +9,8 @@ import (
 	"github.com/wangjibin555/AI-Agent-Arrange/pkg/apperr"
 )
 
-// ExecutionState centralizes workflow execution state mutations and side effects.
+// ExecutionState 抽象了工作流执行状态的写入入口。
+// 这样可以把“更新内存状态”和“发送运行时事件/持久化快照”等副作用集中管理。
 type ExecutionState interface {
 	StartStep(execution *WorkflowExecution, step *Step, opts StepStartOptions) *StepExecution
 	CompleteStep(execution *WorkflowExecution, step *Step, stepExec *StepExecution, result map[string]interface{}) error
@@ -20,6 +21,7 @@ type ExecutionState interface {
 	SaveCheckpoint(execution *WorkflowExecution, stepID string, checkpoint *StreamCheckpoint) error
 }
 
+// workflowExecutionState 是 Engine 对 ExecutionState 的默认实现。
 type workflowExecutionState struct {
 	engine *Engine
 }
@@ -28,6 +30,7 @@ func (e *Engine) executionState() *workflowExecutionState {
 	return &workflowExecutionState{engine: e}
 }
 
+// StartStep 初始化步骤执行记录，并发布开始事件。
 func (s *workflowExecutionState) StartStep(execution *WorkflowExecution, step *Step, opts StepStartOptions) *StepExecution {
 	now := time.Now()
 	stepExec := &StepExecution{
@@ -71,10 +74,12 @@ func (s *workflowExecutionState) StartStep(execution *WorkflowExecution, step *S
 	return stepExec
 }
 
+// CompleteStep 使用默认完成选项结束一个步骤。
 func (s *workflowExecutionState) CompleteStep(execution *WorkflowExecution, step *Step, stepExec *StepExecution, result map[string]interface{}) error {
 	return s.CompleteStepWithOptions(execution, step, stepExec, result, StepCompletionOptions{})
 }
 
+// FailStep 将步骤标记为失败，并记录结构化错误信息与运行时事件。
 func (s *workflowExecutionState) FailStep(execution *WorkflowExecution, stepExec *StepExecution, err error) error {
 	stepExec.Status = WorkflowStatusFailed
 	stepExec.Error = err.Error()
@@ -100,6 +105,7 @@ func (s *workflowExecutionState) FailStep(execution *WorkflowExecution, stepExec
 	return err
 }
 
+// SkipStep 将步骤标记为跳过，并把原因写入 metadata。
 func (s *workflowExecutionState) SkipStep(execution *WorkflowExecution, step *Step, reason string) {
 	now := time.Now()
 	stepExec := &StepExecution{
@@ -128,6 +134,7 @@ func (s *workflowExecutionState) SkipStep(execution *WorkflowExecution, step *St
 	})
 }
 
+// ApplyRoute 在路由步骤完成后计算本次命中的分支，并写回执行状态。
 func (s *workflowExecutionState) ApplyRoute(execution *WorkflowExecution, step *Step, stepExec *StepExecution) error {
 	if step == nil || step.Route == nil {
 		return nil
@@ -160,6 +167,7 @@ func (s *workflowExecutionState) ApplyRoute(execution *WorkflowExecution, step *
 	return nil
 }
 
+// FinishExecution 在工作流结束时统一封口状态、错误信息和完成时间。
 func (s *workflowExecutionState) FinishExecution(execution *WorkflowExecution, status WorkflowStatus, message string) {
 	s.engine.mu.Lock()
 	if execution.CompletedAt != nil || (execution.Status != WorkflowStatusRunning && execution.Status != WorkflowStatusPending) {
@@ -184,6 +192,7 @@ func (s *workflowExecutionState) FinishExecution(execution *WorkflowExecution, s
 	})
 }
 
+// SaveCheckpoint 保存流式步骤的 checkpoint，用于恢复和观测。
 func (s *workflowExecutionState) SaveCheckpoint(execution *WorkflowExecution, stepID string, checkpoint *StreamCheckpoint) error {
 	if checkpoint == nil {
 		return nil

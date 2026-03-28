@@ -5,20 +5,20 @@ import (
 	"sync"
 )
 
-// Registry manages all available tools
+// Registry 管理当前系统中所有已注册的工具。
 type Registry struct {
 	mu    sync.RWMutex
 	tools map[string]Tool
 }
 
-// NewRegistry creates a new tool registry
+// NewRegistry 创建工具注册中心。
 func NewRegistry() *Registry {
 	return &Registry{
 		tools: make(map[string]Tool),
 	}
 }
 
-// Register registers a new tool
+// Register 注册一个新的工具实例。
 func (r *Registry) Register(tool Tool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -40,7 +40,7 @@ func (r *Registry) Register(tool Tool) error {
 	return nil
 }
 
-// Get retrieves a tool by name
+// Get 按名称获取工具实例。
 func (r *Registry) Get(name string) (Tool, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -53,7 +53,7 @@ func (r *Registry) Get(name string) (Tool, error) {
 	return tool, nil
 }
 
-// GetAll returns all registered tools
+// GetAll 返回全部已注册工具。
 func (r *Registry) GetAll() []Tool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -66,7 +66,7 @@ func (r *Registry) GetAll() []Tool {
 	return tools
 }
 
-// GetDefinitions returns all tool definitions (for LLM function calling)
+// GetDefinitions 返回全部工具定义，主要用于 LLM 函数调用能力暴露。
 func (r *Registry) GetDefinitions() []*Definition {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -79,7 +79,7 @@ func (r *Registry) GetDefinitions() []*Definition {
 	return defs
 }
 
-// Has checks if a tool exists
+// Has 判断工具是否已注册。
 func (r *Registry) Has(name string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -88,7 +88,7 @@ func (r *Registry) Has(name string) bool {
 	return exists
 }
 
-// Unregister removes a tool from the registry
+// Unregister 从注册中心移除一个工具。
 func (r *Registry) Unregister(name string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -101,7 +101,7 @@ func (r *Registry) Unregister(name string) error {
 	return nil
 }
 
-// Count returns the number of registered tools
+// Count 返回当前已注册工具数量。
 func (r *Registry) Count() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

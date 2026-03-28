@@ -13,7 +13,8 @@ import (
 	"github.com/wangjibin555/AI-Agent-Arrange/pkg/apperr"
 )
 
-// Engine executes workflows
+// Engine 是工作流执行引擎。
+// 它负责把静态 Workflow 定义转成运行中的 WorkflowExecution，并驱动各步骤按 DAG 关系推进。
 type Engine struct {
 	agentRegistry  *agent.Registry
 	repository     Repository
@@ -23,25 +24,25 @@ type Engine struct {
 	eventPublisher EventPublisher
 	runtimeEvents  *runtimeEventDispatcher
 	defaultTimeout time.Duration
-	maxConcurrency int // Max parallel steps per workflow
+	maxConcurrency int // 单个工作流允许的最大并行步骤数
 	metrics        *monitor.WorkflowMetrics
 }
 
-// EventPublisher publishes workflow events
+// EventPublisher 定义工作流事件发布接口。
 type EventPublisher interface {
 	PublishWorkflowEvent(executionID string, eventType string, status string, message string, data map[string]interface{})
 }
 
-// EngineConfig holds configuration for the workflow engine
+// EngineConfig 定义工作流引擎的运行配置。
 type EngineConfig struct {
 	AgentRegistry  *agent.Registry
 	Repository     Repository
 	EventPublisher EventPublisher
 	DefaultTimeout time.Duration
-	MaxConcurrency int // 0 = unlimited
+	MaxConcurrency int // 0 表示不限制
 }
 
-// NewEngine creates a new workflow engine
+// NewEngine 创建工作流引擎，并初始化运行时事件分发器。
 func NewEngine(config EngineConfig) *Engine {
 	if config.DefaultTimeout == 0 {
 		config.DefaultTimeout = 30 * time.Minute
@@ -71,12 +72,13 @@ func (e *Engine) SetMetrics(metrics *monitor.WorkflowMetrics) {
 type StepDecision string
 
 const (
-	StepDecisionWait    StepDecision = "wait"
-	StepDecisionExecute StepDecision = "execute"
-	StepDecisionSkip    StepDecision = "skip"
+	StepDecisionWait    StepDecision = "wait"    // 依赖未满足，继续等待
+	StepDecisionExecute StepDecision = "execute" // 满足执行条件，立即执行
+	StepDecisionSkip    StepDecision = "skip"    // 明确不需要执行，标记跳过
 )
 
-// Execute starts execution of a workflow
+// Execute 启动一次新的工作流执行。
+// 这里会先完成编译和执行实例初始化，再异步进入真正的调度循环。
 func (e *Engine) Execute(ctx context.Context, workflow *Workflow, variables map[string]interface{}) (*WorkflowExecution, error) {
 	compiled, err := CompileWorkflow(workflow)
 	if err != nil {
@@ -96,7 +98,8 @@ func (e *Engine) Execute(ctx context.Context, workflow *Workflow, variables map[
 	return execution, nil
 }
 
-// executeWorkflow executes the workflow steps according to DAG
+// executeWorkflow 按编译后的 DAG 关系推进步骤执行。
+// 实际的步骤调度、状态变更、回滚与收尾逻辑会下沉到 runtime kernel 中统一处理。
 func (e *Engine) executeWorkflow(ctx context.Context, workflow *CompiledWorkflow, execution *WorkflowExecution) {
 	kernel := newRuntimeKernel(
 		e,
@@ -113,14 +116,15 @@ func (e *Engine) executeWorkflow(ctx context.Context, workflow *CompiledWorkflow
 	e.runExecutionLifecycle(ctx, workflow.Source, execution, kernel.Run)
 }
 
-// evaluateStepDecision determines if a step should execute, wait, or be skipped.
+// evaluateStepDecision 判断步骤当前应执行、等待还是跳过。
+// 这个决策会综合依赖完成情况、上游失败策略、动态路由和条件表达式。
 func (e *Engine) evaluateStepDecision(
 	workflow *CompiledWorkflow,
 	step *CompiledStep,
 	execution *WorkflowExecution,
 	completed, failed map[string]bool,
 ) (StepDecision, string, error) {
-	// Check if all dependencies are met
+	// 先检查普通依赖与 foreach 依赖是否满足。
 	for _, edge := range workflow.Incoming[step.ID] {
 		if edge.Kind != CompiledEdgeDependency && edge.Kind != CompiledEdgeForeach {
 			continue
@@ -161,7 +165,7 @@ func (e *Engine) evaluateStepDecision(
 	return StepDecisionExecute, "", nil
 }
 
-// evaluateCondition 评估步骤条件
+// evaluateCondition 评估步骤条件配置。
 func (e *Engine) evaluateCondition(cond *Condition, ctx *ExecutionContext, completed map[string]bool) (bool, error) {
 	engine := NewTemplateEngine(ctx)
 
@@ -170,12 +174,11 @@ func (e *Engine) evaluateCondition(cond *Condition, ctx *ExecutionContext, compl
 		return true, nil
 
 	case ConditionTypeStatus:
-		// Check if a step has a specific status
-		// Format: step_id in completed map
+		// 通过 completed 集合判断某个步骤是否已达到目标状态。
 		return completed[cond.Status], nil
 
 	case ConditionTypeExpression:
-		// Evaluate expression
+		// 使用模板引擎计算表达式。
 		return engine.EvaluateCondition(cond.Expression)
 
 	default:
@@ -183,6 +186,7 @@ func (e *Engine) evaluateCondition(cond *Condition, ctx *ExecutionContext, compl
 	}
 }
 
+// routeAllowsStep 根据上游路由步骤的选择结果判断当前步骤是否允许执行。
 func (e *Engine) routeAllowsStep(workflow *CompiledWorkflow, step *CompiledStep, execution *WorkflowExecution) (bool, string, error) {
 	for _, edge := range workflow.Incoming[step.ID] {
 		if edge.Kind != CompiledEdgeRoute {
@@ -221,9 +225,10 @@ func (e *Engine) routeAllowsStep(workflow *CompiledWorkflow, step *CompiledStep,
 	return true, "", nil
 }
 
+// routeTargetsStep 判断一个步骤是否受 route 控制，以及当前选中的分支是否命中该步骤。
 func routeTargetsStep(route *RouteConfig, stepID, selected string) (bool, bool) {
 	targeted := false
-	//找到激活的下游stepId
+	// 先判断当前步骤是否属于该 route 管理的任何下游节点。
 	for _, targets := range route.Cases {
 		if slices.Contains(targets, stepID) {
 			targeted = true
@@ -233,7 +238,9 @@ func routeTargetsStep(route *RouteConfig, stepID, selected string) (bool, bool) 
 	if !targeted && slices.Contains(route.Default, stepID) {
 		targeted = true
 	}
-	//返回当前step与这个route是否有关，无法拿当前路由进行限制，并且通知当前step是否是router控制下的分支节点，如果本次没有被选中，则返回false跳过
+	// 返回值分别表示：
+	// 1. 当前步骤是否属于该路由的下游集合
+	// 2. 在本次 selected 分支下，该步骤是否应被放行执行
 	if !targeted {
 		return false, false
 	}

@@ -5,20 +5,20 @@ import (
 	"sync"
 )
 
-// Registry manages all registered agents
+// Registry 管理系统中所有已注册的 Agent。
 type Registry struct {
 	agents map[string]Agent
 	mu     sync.RWMutex
 }
 
-// NewRegistry creates a new agent registry
+// NewRegistry 创建 Agent 注册中心。
 func NewRegistry() *Registry {
 	return &Registry{
 		agents: make(map[string]Agent),
 	}
 }
 
-// Register registers a new agent
+// Register 注册一个新的 Agent。
 func (r *Registry) Register(agent Agent) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -33,7 +33,7 @@ func (r *Registry) Register(agent Agent) error {
 	return nil
 }
 
-// Unregister removes an agent from the registry
+// Unregister 从注册中心移除一个 Agent。
 func (r *Registry) Unregister(name string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -46,7 +46,7 @@ func (r *Registry) Unregister(name string) error {
 	return nil
 }
 
-// Get retrieves an agent by name
+// Get 按名称获取 Agent。
 func (r *Registry) Get(name string) (Agent, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -59,7 +59,7 @@ func (r *Registry) Get(name string) (Agent, error) {
 	return agent, nil
 }
 
-// GetAll returns all registered agents
+// GetAll 返回全部已注册 Agent。
 func (r *Registry) GetAll() map[string]Agent {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -71,7 +71,7 @@ func (r *Registry) GetAll() map[string]Agent {
 	return result
 }
 
-// FindByCapability finds all agents with a specific capability
+// FindByCapability 查找具备指定能力的全部 Agent。
 func (r *Registry) FindByCapability(capability string) []Agent {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

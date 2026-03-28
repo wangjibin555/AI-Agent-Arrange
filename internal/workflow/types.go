@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// WorkflowStatus represents the status of a workflow execution
+// WorkflowStatus 表示工作流执行实例的状态。
 type WorkflowStatus string
 
 const (
@@ -18,7 +18,7 @@ const (
 	WorkflowStatusSkipped   WorkflowStatus = "skipped"
 )
 
-// RecoveryStatus represents restart recovery lifecycle for a workflow execution.
+// RecoveryStatus 表示工作流执行在重启恢复场景下的生命周期状态。
 type RecoveryStatus string
 
 const (
@@ -28,7 +28,8 @@ const (
 	RecoveryStatusSuperseded  RecoveryStatus = "superseded"
 )
 
-// Workflow 表示完整的工作流定义
+// Workflow 表示完整的工作流定义。
+// 它是静态声明，描述步骤、依赖、全局变量以及失败策略，不包含运行时状态。
 type Workflow struct {
 	ID          string                 `json:"id" yaml:"id"`
 	Name        string                 `json:"name" yaml:"name"`
@@ -42,7 +43,8 @@ type Workflow struct {
 	UpdatedAt   time.Time              `json:"updated_at" yaml:"-"`
 }
 
-// Step 表示工作流中的单个步骤
+// Step 表示工作流中的单个执行节点。
+// 一个步骤既可以是普通 Agent 调用，也可以带有路由、foreach、流式执行等高级语义。
 type Step struct {
 	ID                 string                 `json:"id" yaml:"id"`                                                       // 步骤唯一标识符
 	Name               string                 `json:"name,omitempty" yaml:"name,omitempty"`                               // 可读的步骤名称
@@ -67,25 +69,29 @@ type Step struct {
 	CompensationParams map[string]interface{} `json:"compensation_params,omitempty" yaml:"compensation_params,omitempty"` // 补偿动作参数
 }
 
+// StepSchema 描述步骤输入/输出的弱约束。
+// 当前仅校验必填字段，用于在运行时尽早暴露上下游契约问题。
 type StepSchema struct {
 	Required []string `json:"required,omitempty" yaml:"required,omitempty"`
 }
 
-// Condition 表示条件执行规则
+// Condition 表示步骤的条件执行规则。
 type Condition struct {
 	Type       ConditionType `json:"type" yaml:"type"`                                 // 条件类型（表达式、状态等）
 	Expression string        `json:"expression,omitempty" yaml:"expression,omitempty"` // 条件表达式（例如："{{step1.result.value}} > 10"）
 	Status     string        `json:"status,omitempty" yaml:"status,omitempty"`         // 依赖步骤所需的状态
 }
 
-// RouteConfig 定义步骤完成后的动态路由规则
+// RouteConfig 定义步骤完成后的动态路由规则。
+// 路由表达式的求值结果会映射到不同的下游分支。
 type RouteConfig struct {
 	Expression string              `json:"expression" yaml:"expression"`               // 路由表达式，渲染结果作为 case key
 	Cases      map[string][]string `json:"cases,omitempty" yaml:"cases,omitempty"`     // route key -> 激活的下游步骤ID
 	Default    []string            `json:"default,omitempty" yaml:"default,omitempty"` // 未命中任何 case 时默认激活的步骤
 }
 
-// ForeachConfig 定义步骤内部的 fan-out / 批处理展开语义
+// ForeachConfig 定义步骤内部的 fan-out / 批处理展开语义。
+// 它允许把一个数组输入拆成多个子任务并发执行，再在步骤内部汇总。
 type ForeachConfig struct {
 	From        string `json:"from" yaml:"from"`                                     // 数组来源表达式
 	ItemAs      string `json:"item_as,omitempty" yaml:"item_as,omitempty"`           // 当前 item 注入到模板中的变量名
@@ -93,29 +99,29 @@ type ForeachConfig struct {
 	MaxParallel int    `json:"max_parallel,omitempty" yaml:"max_parallel,omitempty"` // foreach 内部最大并发度
 }
 
-// ConditionType represents the type of condition
+// ConditionType 表示条件判断的类型。
 type ConditionType string
 
 const (
-	ConditionTypeExpression ConditionType = "expression" // Evaluate an expression
-	ConditionTypeStatus     ConditionType = "status"     // Check step status
-	ConditionTypeAlways     ConditionType = "always"     // Always execute
+	ConditionTypeExpression ConditionType = "expression" // 计算表达式结果
+	ConditionTypeStatus     ConditionType = "status"     // 检查指定步骤状态
+	ConditionTypeAlways     ConditionType = "always"     // 无条件执行
 )
 
-// FailurePolicy defines what happens when the workflow fails
+// FailurePolicy 定义工作流整体失败后的处理策略。
 type FailurePolicy struct {
-	Rollback bool     `json:"rollback,omitempty" yaml:"rollback,omitempty"` // Rollback executed steps
-	Notify   []string `json:"notify,omitempty" yaml:"notify,omitempty"`     // Notification channels
+	Rollback bool     `json:"rollback,omitempty" yaml:"rollback,omitempty"` // 是否回滚已执行的步骤
+	Notify   []string `json:"notify,omitempty" yaml:"notify,omitempty"`     // 失败后的通知渠道
 }
 
-// StepFailurePolicy defines what happens when a step fails
+// StepFailurePolicy 定义单个步骤失败后的处理动作。
 type StepFailurePolicy struct {
-	Action string `json:"action" yaml:"action"` // "fail", "continue", "retry", "rollback"
+	Action string `json:"action" yaml:"action"` // 可选值："fail"、"continue"、"retry"、"rollback"
 }
 
-// ContinuePolicy defines when to continue execution despite errors
+// ContinuePolicy 定义在出现错误时是否继续推进后续步骤。
 type ContinuePolicy struct {
-	OnError bool `json:"on_error,omitempty" yaml:"on_error,omitempty"` // Continue on error
+	OnError bool `json:"on_error,omitempty" yaml:"on_error,omitempty"` // 为 true 时，允许依赖方忽略上游错误继续执行
 }
 
 // StreamingConfig 定义步骤的流式执行行为
@@ -151,7 +157,7 @@ type StreamingConfig struct {
 	CheckpointEnabled *bool `json:"checkpoint_enabled,omitempty" yaml:"checkpoint_enabled,omitempty"`
 }
 
-// 默认流式配置值
+// 默认流式配置值。
 const (
 	DefaultWaitFor        = "full"   // 默认等待完整数据
 	DefaultBufferStrategy = "memory" // 默认使用内存缓冲
@@ -160,7 +166,8 @@ const (
 	DefaultOnError        = "stop"   // 默认错误时停止
 )
 
-// WorkflowExecution represents a running or completed workflow instance
+// WorkflowExecution 表示一次具体的工作流执行实例。
+// 它承载运行时上下文、各步骤执行状态、路由选择、checkpoint 以及恢复信息。
 type WorkflowExecution struct {
 	ID                      string                       `json:"id"`
 	WorkflowID              string                       `json:"workflow_id"`
@@ -169,7 +176,7 @@ type WorkflowExecution struct {
 	CurrentStep             string                       `json:"current_step,omitempty"`
 	SupersededByExecutionID string                       `json:"superseded_by_execution_id,omitempty"`
 	StepExecutions          map[string]*StepExecution    `json:"step_executions"` // stepID -> execution details
-	Context                 *ExecutionContext            `json:"context"`         // Workflow execution context
+	Context                 *ExecutionContext            `json:"context"`         // 工作流运行时上下文，包含变量和步骤输出
 	Checkpoints             map[string]*StreamCheckpoint `json:"checkpoints,omitempty"`
 	ResumeState             *ExecutionResumeState        `json:"resume_state,omitempty"`
 	RouteSelections         map[string]string            `json:"route_selections,omitempty"` // router stepID -> selected route key
@@ -204,19 +211,22 @@ func (n *executionNotifier) Notify() {
 	n.ch = make(chan struct{})
 }
 
-// StepExecution represents the execution status of a single step
+// StepExecution 记录单个步骤在某次工作流执行中的运行状态。
+// 它是排查步骤失败、重试次数、路由结果和输出数据的核心观察对象。
 type StepExecution struct {
 	StepID      string                 `json:"step_id"`
 	Status      WorkflowStatus         `json:"status"`
-	TaskID      string                 `json:"task_id,omitempty"`     // Associated orchestrator task ID
-	Result      map[string]interface{} `json:"result,omitempty"`      // Step execution result
-	Error       string                 `json:"error,omitempty"`       // Error message if failed
-	RetryCount  int                    `json:"retry_count,omitempty"` // Number of retries attempted
+	TaskID      string                 `json:"task_id,omitempty"`     // 关联的编排器任务 ID
+	Result      map[string]interface{} `json:"result,omitempty"`      // 步骤执行结果
+	Error       string                 `json:"error,omitempty"`       // 失败时的错误信息
+	RetryCount  int                    `json:"retry_count,omitempty"` // 已执行的重试次数
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
-	StartedAt   time.Time              `json:"started_at"`             // Step start time
-	CompletedAt *time.Time             `json:"completed_at,omitempty"` // Step completion time
+	StartedAt   time.Time              `json:"started_at"`             // 步骤开始时间
+	CompletedAt *time.Time             `json:"completed_at,omitempty"` // 步骤结束时间
 }
 
+// StreamCheckpoint 记录流式步骤的恢复点。
+// 当流式步骤中断后，可基于该信息决定从哪里继续或如何标记恢复状态。
 type StreamCheckpoint struct {
 	StepID      string                 `json:"step_id"`
 	ChunkIndex  int                    `json:"chunk_index"`
@@ -226,6 +236,7 @@ type StreamCheckpoint struct {
 	Timestamp   time.Time              `json:"timestamp"`
 }
 
+// Clone 返回 checkpoint 的深拷贝，避免运行时状态被外部直接修改。
 func (c *StreamCheckpoint) Clone() *StreamCheckpoint {
 	if c == nil {
 		return nil
@@ -240,19 +251,21 @@ func (c *StreamCheckpoint) Clone() *StreamCheckpoint {
 	}
 }
 
+// ExecutionResumeState 记录恢复执行时继承自上一次执行的关键信息。
 type ExecutionResumeState struct {
 	SourceExecutionID string   `json:"source_execution_id,omitempty"`
 	RestoredSteps     []string `json:"restored_steps,omitempty"`
 }
 
-// ExecutionContext holds runtime data for workflow execution
+// ExecutionContext 保存工作流运行时共享上下文。
+// 它包含全局变量和步骤输出，并通过读写锁保证并发访问安全。
 type ExecutionContext struct {
 	mu        sync.RWMutex
 	variables map[string]interface{}
 	outputs   map[string]map[string]interface{}
 }
 
-// NewExecutionContext creates a new execution context
+// NewExecutionContext 创建新的执行上下文，并复制初始变量，避免外部引用污染运行态。
 func NewExecutionContext(variables map[string]interface{}) *ExecutionContext {
 	clonedVariables := copyMap(variables)
 	if clonedVariables == nil {
@@ -264,14 +277,14 @@ func NewExecutionContext(variables map[string]interface{}) *ExecutionContext {
 	}
 }
 
-// SetStepOutput stores the output of a step
+// SetStepOutput 写入某个步骤的最终或最新输出快照。
 func (c *ExecutionContext) SetStepOutput(stepID string, output map[string]interface{}) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.outputs[stepID] = copyMap(output)
 }
 
-// GetStepOutput retrieves the output of a step
+// GetStepOutput 读取某个步骤输出的副本，避免调用方直接修改内部状态。
 func (c *ExecutionContext) GetStepOutput(stepID string) (map[string]interface{}, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -283,7 +296,8 @@ func (c *ExecutionContext) GetStepOutput(stepID string) (map[string]interface{},
 	return copyMap(output), true
 }
 
-// MergeStepOutput merges partial output into one step output and returns the merged snapshot.
+// MergeStepOutput 把增量输出合并到某个步骤已有输出中，并返回合并后的副本。
+// 这主要用于流式步骤不断追加 partial 结果的场景。
 func (c *ExecutionContext) MergeStepOutput(stepID string, output map[string]interface{}) map[string]interface{} {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -299,7 +313,7 @@ func (c *ExecutionContext) MergeStepOutput(stepID string, output map[string]inte
 	return copyMap(merged)
 }
 
-// SetVariable sets a global variable
+// SetVariable 设置一个全局变量。
 func (c *ExecutionContext) SetVariable(key string, value interface{}) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -309,7 +323,7 @@ func (c *ExecutionContext) SetVariable(key string, value interface{}) {
 	c.variables[key] = value
 }
 
-// GetVariable retrieves a global variable
+// GetVariable 获取一个全局变量。
 func (c *ExecutionContext) GetVariable(key string) (interface{}, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

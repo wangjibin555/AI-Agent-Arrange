@@ -11,7 +11,7 @@ import (
 	"github.com/wangjibin555/AI-Agent-Arrange/pkg/apperr"
 )
 
-// TaskRepository defines the interface for task persistence
+// TaskRepository 定义任务持久化所需的最小存储接口。
 type TaskRepository interface {
 	Create(ctx context.Context, task *Task) error
 	Update(ctx context.Context, task *Task) error
@@ -20,12 +20,14 @@ type TaskRepository interface {
 	GetRunningTasks(ctx context.Context) ([]*Task, error)
 }
 
-// TaskEventPublisher defines the interface for publishing task events
+// TaskEventPublisher 定义任务事件发布接口。
+// TaskManager 通过它把状态变化同步给 SSE、消息队列或其他观测组件。
 type TaskEventPublisher interface {
 	PublishTaskEvent(taskID string, eventType string, status string, message string, result map[string]interface{}, errorMsg string)
 }
 
-// TaskManager manages task lifecycle and persistence
+// TaskManager 负责管理任务的完整生命周期。
+// 它同时承担内存态任务缓存、待执行队列、Agent 负载跟踪、持久化协调与事件发布。
 type TaskManager struct {
 	tasks            map[string]*Task    // taskID -> Task (内存缓存)
 	agentTasks       map[string][]string // agentName -> []taskID (正在执行的任务列表)
@@ -42,7 +44,7 @@ type TaskManager struct {
 	metrics          *monitor.TaskMetrics
 }
 
-// TaskManagerConfig contains configuration for TaskManager
+// TaskManagerConfig 定义 TaskManager 的运行参数。
 type TaskManagerConfig struct {
 	MaxRetries       int                // 最大重试次数
 	RetryInterval    time.Duration      // 重试间隔
@@ -52,7 +54,7 @@ type TaskManagerConfig struct {
 	EventPublisher   TaskEventPublisher // 可选的事件发布器
 }
 
-// NewTaskManager creates a new task manager
+// NewTaskManager 创建任务管理器，并在需要时恢复历史未完成任务。
 func NewTaskManager(registry *agent.Registry, config TaskManagerConfig) *TaskManager {
 	tm := &TaskManager{
 		tasks:            make(map[string]*Task),
@@ -85,7 +87,8 @@ func (tm *TaskManager) SetMetrics(metrics *monitor.TaskMetrics) {
 	tm.observeAgentLoadsLocked()
 }
 
-// RecoverTasks recovers pending and running tasks from database on startup
+// RecoverTasks 在服务启动时恢复数据库中的未完成任务。
+// running 状态的任务会被重置为 pending，以便由新的 Worker 重新调度。
 func (tm *TaskManager) RecoverTasks(ctx context.Context) error {
 	if tm.repository == nil {
 		return nil
@@ -148,7 +151,8 @@ func (tm *TaskManager) RecoverTasks(ctx context.Context) error {
 	return nil
 }
 
-// CreateTask creates and stores a new task
+// CreateTask 创建新任务并写入内存/持久化层。
+// 任务创建后默认进入 pending 队列，等待 Worker 拉取。
 func (tm *TaskManager) CreateTask(ctx context.Context, task *Task) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
@@ -194,7 +198,8 @@ func (tm *TaskManager) CreateTask(ctx context.Context, task *Task) error {
 	return nil
 }
 
-// 这是 Worker 调用的核心方法：自动选择任务和 Agent
+// PullNextTask 是 Worker 拉取任务的核心入口。
+// 它会从待执行队列中取出任务、按能力和负载选择 Agent，并原子地切换任务状态。
 func (tm *TaskManager) PullNextTask(ctx context.Context) (*Task, error) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
@@ -300,7 +305,7 @@ func cloneTask(task *Task) *Task {
 	return &cloned
 }
 
-// WaitForTask blocks until a task is available or context is cancelled
+// WaitForTask 阻塞等待任务到来，或在上下文取消/超时后返回。
 func (tm *TaskManager) WaitForTask(ctx context.Context) error {
 	// 先检查是否有任务
 	tm.mu.RLock()
@@ -323,12 +328,12 @@ func (tm *TaskManager) WaitForTask(ctx context.Context) error {
 	}
 }
 
-// GetRegistry returns the underlying agent registry.
+// GetRegistry 返回底层 Agent 注册中心。
 func (tm *TaskManager) GetRegistry() *agent.Registry {
 	return tm.registry
 }
 
-// selectAgentForTask selects the best agent for a task based on capability and load balancing
+// selectAgentForTask 根据任务配置、能力需求和当前负载选择最合适的 Agent。
 func (tm *TaskManager) selectAgentForTask(task *Task) (agent.Agent, error) {
 	resolver := agent.NewResolver(tm.registry)
 	return resolver.Resolve(agent.ResolveRequest{
@@ -372,8 +377,8 @@ func (tm *TaskManager) selectLeastLoadedCandidate(candidateAgents []agent.Agent)
 	return selectedAgent, nil
 }
 
-// inferCapabilityFromAction infers the required capability from the action
-// 从 Action 推断需要的能力
+// inferCapabilityFromAction 根据 Action 推断任务所需能力。
+// 这层映射让上层只声明“动作”，而调度层负责路由到合适的 Agent 能力集合。
 func inferCapabilityFromAction(action string) string {
 	// Action → Capability 映射表
 	actionCapabilityMap := map[string]string{
@@ -415,7 +420,7 @@ func inferCapabilityFromAction(action string) string {
 	return ""
 }
 
-// GetAgentLoad returns the current load of an agent
+// GetAgentLoad 返回指定 Agent 当前正在执行的任务数。
 func (tm *TaskManager) GetAgentLoad(agentName string) int {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
@@ -423,7 +428,7 @@ func (tm *TaskManager) GetAgentLoad(agentName string) int {
 	return len(tm.agentTasks[agentName])
 }
 
-// GetTask retrieves a task by ID (memory first, then database)
+// GetTask 按 ID 查询任务，优先读取内存缓存，不命中时再回退到持久化层。
 func (tm *TaskManager) GetTask(ctx context.Context, taskID string) (*Task, error) {
 	tm.mu.RLock()
 	task, exists := tm.tasks[taskID]
@@ -449,7 +454,7 @@ func (tm *TaskManager) GetTask(ctx context.Context, taskID string) (*Task, error
 	return nil, apperr.NotFoundf("task %s not found", taskID).WithCode("task_not_found")
 }
 
-// UpdateTaskStatus updates the status of a task
+// UpdateTaskStatus 更新任务状态，并同步必要的时间戳。
 func (tm *TaskManager) UpdateTaskStatus(taskID string, status TaskStatus, result map[string]interface{}, err string) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
@@ -497,7 +502,7 @@ func (tm *TaskManager) MarkTaskAsRunning(taskID, agentName string) error {
 	return nil
 }
 
-// MarkTaskAsCompleted marks a task as completed
+// MarkTaskAsCompleted 将任务标记为完成，并清理 Agent 负载占用。
 func (tm *TaskManager) MarkTaskAsCompleted(ctx context.Context, taskID, agentName string, result map[string]interface{}) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
@@ -538,7 +543,7 @@ func (tm *TaskManager) MarkTaskAsCompleted(ctx context.Context, taskID, agentNam
 	return nil
 }
 
-// MarkTaskAsFailed marks a task as failed and optionally retries it
+// MarkTaskAsFailed 将任务标记为失败，并根据重试策略决定是否重新入队。
 func (tm *TaskManager) MarkTaskAsFailed(ctx context.Context, taskID, agentName string, errMsg string) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()

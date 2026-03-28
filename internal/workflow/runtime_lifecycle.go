@@ -8,14 +8,15 @@ import (
 	"github.com/wangjibin555/AI-Agent-Arrange/pkg/apperr"
 )
 
-// StepCompletionOptions customizes completion side effects for special step modes.
+// StepStartOptions 自定义步骤开始时对外发送的事件内容。
 type StepStartOptions struct {
 	EventType string
 	Message   string
 	EventData map[string]interface{}
 }
 
-// StepCompletionOptions customizes completion side effects for special step modes.
+// StepCompletionOptions 自定义步骤完成时的事件和附加副作用。
+// 特殊步骤模式可以通过它覆盖默认的 “step_completed” 行为。
 type StepCompletionOptions struct {
 	EventType string
 	Message   string
@@ -26,6 +27,7 @@ func (o StepCompletionOptions) isZero() bool {
 	return o.EventType == "" && o.Message == "" && o.EventData == nil
 }
 
+// CompleteStepWithOptions 在步骤成功后统一落状态、写上下文、应用路由并发布事件。
 func (s *workflowExecutionState) CompleteStepWithOptions(
 	execution *WorkflowExecution,
 	step *Step,
@@ -45,6 +47,7 @@ func (s *workflowExecutionState) CompleteStepWithOptions(
 	now := time.Now()
 	stepExec.CompletedAt = &now
 
+	// 步骤结果会写回共享上下文，供下游模板渲染和条件判断使用。
 	execution.Context.SetStepOutput(step.ID, result)
 	if step.OutputAlias != "" {
 		execution.Context.SetVariable(step.OutputAlias, result)
@@ -85,6 +88,7 @@ func (s *workflowExecutionState) CompleteStepWithOptions(
 	return nil
 }
 
+// validateStepOutputSchema 校验步骤输出是否满足声明的弱 schema。
 func validateStepOutputSchema(step *Step, result map[string]interface{}) error {
 	if step == nil || step.OutputSchema == nil || len(step.OutputSchema.Required) == 0 {
 		return nil
@@ -97,6 +101,7 @@ func validateStepOutputSchema(step *Step, result map[string]interface{}) error {
 	return nil
 }
 
+// newStreamingCheckpoint 根据当前流式缓冲区快照创建 checkpoint。
 func newStreamingCheckpoint(stepID string, buffer *StreamBuffer, output map[string]interface{}) *StreamCheckpoint {
 	if buffer == nil {
 		return nil

@@ -9,7 +9,8 @@ import (
 	"strings"
 )
 
-// TemplateEngine handles variable substitution in workflow parameters
+// TemplateEngine 负责工作流参数中的模板解析。
+// 它既支持把表达式渲染成字符串，也支持直接取原始值用于 foreach、condition 等场景。
 type TemplateEngine struct {
 	context *ExecutionContext
 }
@@ -17,18 +18,18 @@ type TemplateEngine struct {
 var templateExprRE = regexp.MustCompile(`\{\{([^}]+)\}\}`)
 var conditionOperatorRE = regexp.MustCompile(`^(.*?)\s*(==|!=|>=|<=|>|<)\s*(.*?)$`)
 
-// NewTemplateEngine creates a new template engine
+// NewTemplateEngine 创建模板引擎。
 func NewTemplateEngine(ctx *ExecutionContext) *TemplateEngine {
 	return &TemplateEngine{
 		context: ctx,
 	}
 }
 
-// Render renders a template string with context variables
-// Supports patterns like:
-//   - {{variable_name}} - global variables
-//   - {{step_id.result.field}} - step output fields
-//   - {{step_id.result}} - entire step result
+// Render 渲染字符串模板。
+// 支持：
+// - `{{variable_name}}` 访问全局变量
+// - `{{step_id.result.field}}` 访问步骤输出字段
+// - `{{step_id.result}}` 访问整个步骤输出
 func (te *TemplateEngine) Render(template string) (string, error) {
 	// 正则表达式匹配所有 {{...}}
 	result := template
@@ -57,8 +58,8 @@ func (te *TemplateEngine) Render(template string) (string, error) {
 	return result, nil
 }
 
-// ResolveValue resolves a template expression to its raw value without converting it to string.
-// Supports either a wrapped expression like "{{step.result.items}}" or a plain expression string.
+// ResolveValue 解析表达式并返回原始值，而不是强制转成字符串。
+// 这通常用于 foreach、condition 或需要保留数组/对象结构的参数渲染场景。
 func (te *TemplateEngine) ResolveValue(expression string) (interface{}, error) {
 	expr := strings.TrimSpace(expression)
 	if strings.HasPrefix(expr, "{{") && strings.HasSuffix(expr, "}}") {
@@ -67,7 +68,7 @@ func (te *TemplateEngine) ResolveValue(expression string) (interface{}, error) {
 	return te.evaluateExpression(expr)
 }
 
-// RenderParameters renders all parameters in a map
+// RenderParameters 递归渲染整张参数表。
 func (te *TemplateEngine) RenderParameters(params map[string]interface{}) (map[string]interface{}, error) {
 	result := make(map[string]interface{})
 
@@ -82,7 +83,7 @@ func (te *TemplateEngine) RenderParameters(params map[string]interface{}) (map[s
 	return result, nil
 }
 
-// renderValue recursively renders a value (handles nested maps and arrays)
+// renderValue 递归渲染单个值，支持 map / slice / string 嵌套结构。
 func (te *TemplateEngine) renderValue(value interface{}) (interface{}, error) {
 	switch v := value.(type) {
 	case string:
@@ -119,7 +120,8 @@ func (te *TemplateEngine) renderValue(value interface{}) (interface{}, error) {
 	}
 }
 
-// evaluateExpression evaluates an expression against the execution context
+// evaluateExpression 根据当前执行上下文解析一个表达式。
+// 解析顺序大致是：全局变量 -> 嵌套全局变量 -> 步骤输出。
 func (te *TemplateEngine) evaluateExpression(expr string) (interface{}, error) {
 	parts := strings.Split(expr, ".")
 
@@ -166,6 +168,7 @@ func (te *TemplateEngine) evaluateExpression(expr string) (interface{}, error) {
 	return "", fmt.Errorf("invalid expression: %s", expr)
 }
 
+// navigateValue 沿字段路径逐层取值，目前主要支持 map 结构。
 func navigateValue(current interface{}, parts []string, expr string) (interface{}, error) {
 	if len(parts) == 0 {
 		return current, nil
@@ -187,7 +190,7 @@ func navigateValue(current interface{}, parts []string, expr string) (interface{
 	return current, nil
 }
 
-// valueToString converts a value to its string representation
+// valueToString 把任意值转换成字符串形式，供模板替换使用。
 func (te *TemplateEngine) valueToString(value interface{}) string {
 	switch v := value.(type) {
 	case string:
@@ -226,11 +229,11 @@ func (te *TemplateEngine) valueToString(value interface{}) string {
 	}
 }
 
-// EvaluateCondition evaluates a condition expression
-// Supports simple comparisons:
-//   - {{step1.result.value}} > 10
-//   - {{variable}} == "success"
-//   - {{step1.result.enabled}} == true
+// EvaluateCondition 评估条件表达式。
+// 支持简单比较，例如：
+// - `{{step1.result.value}} > 10`
+// - `{{variable}} == "success"`
+// - `{{step1.result.enabled}} == true`
 func (te *TemplateEngine) EvaluateCondition(expression string) (bool, error) {
 	expr := strings.TrimSpace(expression)
 	if expr == "" {
@@ -273,6 +276,7 @@ func (te *TemplateEngine) resolveConditionOperand(raw string) (interface{}, erro
 	return te.evaluateExpression(operand)
 }
 
+// parseConditionLiteral 尝试把条件操作数解析为字面量值。
 func parseConditionLiteral(raw string) (interface{}, bool, error) {
 	if len(raw) >= 2 {
 		if (raw[0] == '"' && raw[len(raw)-1] == '"') || (raw[0] == '\'' && raw[len(raw)-1] == '\'') {
@@ -296,6 +300,7 @@ func parseConditionLiteral(raw string) (interface{}, bool, error) {
 	return nil, false, nil
 }
 
+// compareConditionValues 根据运算符比较两个条件操作数。
 func compareConditionValues(left interface{}, operator string, right interface{}) (bool, error) {
 	if leftNum, ok := toComparableNumber(left); ok {
 		if rightNum, ok := toComparableNumber(right); ok {
@@ -347,6 +352,7 @@ func compareConditionValues(left interface{}, operator string, right interface{}
 	}
 }
 
+// compareNumeric 处理数值类型的比较。
 func compareNumeric(left float64, operator string, right float64) (bool, error) {
 	switch operator {
 	case "==":
@@ -366,6 +372,7 @@ func compareNumeric(left float64, operator string, right float64) (bool, error) 
 	}
 }
 
+// toComparableNumber 尝试把常见数字类型统一转换成 float64。
 func toComparableNumber(value interface{}) (float64, bool) {
 	switch v := value.(type) {
 	case int:
@@ -400,6 +407,7 @@ func toComparableNumber(value interface{}) (float64, bool) {
 	}
 }
 
+// stringifyComparableValue 把任意值转换成可比较的稳定字符串形式。
 func stringifyComparableValue(value interface{}) string {
 	switch v := value.(type) {
 	case string:
@@ -431,7 +439,7 @@ func formatMapValue(value map[string]interface{}) string {
 	return "{" + strings.Join(parts, ",") + "}"
 }
 
-// toBoolean converts a value to boolean semantics for conditions.
+// toBoolean 把任意值按条件表达式语义转换为布尔值。
 func (te *TemplateEngine) toBoolean(value interface{}) bool {
 	switch v := value.(type) {
 	case bool:

@@ -103,7 +103,7 @@ func (s *Server) setupRoutes() {
 	// API v1 routes
 	v1 := s.router.Group("/api/v1")
 	{
-		// Task management
+		//任务建立
 		tasks := v1.Group("/tasks")
 		{
 			tasks.POST("", s.handleCreateTask)
@@ -113,7 +113,7 @@ func (s *Server) setupRoutes() {
 			tasks.GET("/:id/stream", s.handleTaskEventStream) // SSE stream
 		}
 
-		// Unified execution APIs
+		// 查询
 		executions := v1.Group("/executions")
 		{
 			executions.GET("/:id", s.handleGetExecution)
@@ -121,6 +121,7 @@ func (s *Server) setupRoutes() {
 			executions.GET("/:id/stream", s.handleExecutionEventStream)
 		}
 
+		//工作流建立
 		workflows := v1.Group("/workflows")
 		{
 			workflows.POST("/execute", s.handleExecuteWorkflow)

@@ -299,9 +299,9 @@ func (e *StreamingEngine) ResumeExecution(
 	return execution, nil
 }
 
-// RecoverRunningExecutions attempts startup recovery for persisted running executions.
-// Streaming executions with checkpoints are resumed into new execution IDs.
-// Non-streaming or non-checkpointed executions are marked as interrupted.
+// RecoverRunningExecutions 尝试恢复已持久运行的执行程序的启动状态。
+// 带有检查点的流式执行程序将恢复到新的执行 ID。
+// 非流式或未设置检查点的执行程序将被标记为已中断。
 func (e *StreamingEngine) RecoverRunningExecutions(ctx context.Context) (int, int, error) {
 	if e.repository == nil {
 		return 0, 0, nil

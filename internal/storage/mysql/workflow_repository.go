@@ -11,17 +11,17 @@ import (
 	"github.com/wangjibin555/AI-Agent-Arrange/pkg/apperr"
 )
 
-// WorkflowRepository persists workflow definitions and execution snapshots in MySQL.
+// WorkflowRepository 负责将工作流定义和执行快照持久化到 MySQL。
 type WorkflowRepository struct {
 	db *DB
 }
 
-// NewWorkflowRepository creates a workflow repository backed by MySQL.
+// NewWorkflowRepository 创建基于 MySQL 的工作流仓储实现。
 func NewWorkflowRepository(db *DB) *WorkflowRepository {
 	return &WorkflowRepository{db: db}
 }
 
-// SaveWorkflow upserts a workflow definition.
+// SaveWorkflow 保存或更新工作流定义。
 func (r *WorkflowRepository) SaveWorkflow(ctx context.Context, wf *workflow.Workflow) error {
 	now := time.Now()
 	if wf.CreatedAt.IsZero() {
@@ -63,7 +63,7 @@ func (r *WorkflowRepository) SaveWorkflow(ctx context.Context, wf *workflow.Work
 	return nil
 }
 
-// GetWorkflow loads a workflow definition by ID.
+// GetWorkflow 按 ID 加载工作流定义。
 func (r *WorkflowRepository) GetWorkflow(ctx context.Context, id string) (*workflow.Workflow, error) {
 	row := r.db.QueryRowWithContext(ctx, `SELECT definition FROM workflows WHERE id = ?`, id)
 
@@ -83,7 +83,7 @@ func (r *WorkflowRepository) GetWorkflow(ctx context.Context, id string) (*workf
 	return &wf, nil
 }
 
-// ListWorkflows returns all stored workflow definitions.
+// ListWorkflows 返回所有已保存的工作流定义。
 func (r *WorkflowRepository) ListWorkflows(ctx context.Context) ([]*workflow.Workflow, error) {
 	rows, err := r.db.QueryWithContext(ctx, `SELECT definition FROM workflows ORDER BY updated_at DESC`)
 	if err != nil {
@@ -112,7 +112,7 @@ func (r *WorkflowRepository) ListWorkflows(ctx context.Context) ([]*workflow.Wor
 	return workflows, nil
 }
 
-// DeleteWorkflow deletes a workflow definition.
+// DeleteWorkflow 删除指定工作流定义。
 func (r *WorkflowRepository) DeleteWorkflow(ctx context.Context, id string) error {
 	result, err := r.db.ExecWithContext(ctx, `DELETE FROM workflows WHERE id = ?`, id)
 	if err != nil {
@@ -130,7 +130,7 @@ func (r *WorkflowRepository) DeleteWorkflow(ctx context.Context, id string) erro
 	return nil
 }
 
-// SaveExecution upserts a workflow execution snapshot.
+// SaveExecution 保存或更新一次工作流执行快照。
 func (r *WorkflowRepository) SaveExecution(ctx context.Context, execution *workflow.WorkflowExecution) error {
 	contextJSON, err := marshalJSON(execution.Context)
 	if err != nil {
@@ -202,7 +202,7 @@ func (r *WorkflowRepository) SaveExecution(ctx context.Context, execution *workf
 	return nil
 }
 
-// GetExecution loads one execution snapshot.
+// GetExecution 加载单个工作流执行快照。
 func (r *WorkflowRepository) GetExecution(ctx context.Context, id string) (*workflow.WorkflowExecution, error) {
 	row := r.db.QueryRowWithContext(ctx, `
 		SELECT

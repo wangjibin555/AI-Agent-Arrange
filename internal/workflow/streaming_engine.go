@@ -12,7 +12,8 @@ import (
 	"github.com/wangjibin555/AI-Agent-Arrange/pkg/apperr"
 )
 
-// StreamingEngine 扩展Engine，增加流式执行能力
+// StreamingEngine 在基础 Engine 之上扩展流式执行能力。
+// 它通过 buffer 把上游步骤的增量输出持续暴露给下游步骤，实现 pipeline 式推进。
 type StreamingEngine struct {
 	*Engine                                       // 嵌入原有引擎
 	buffers   map[string]map[string]*StreamBuffer // executionID -> stepID -> 缓冲区
@@ -45,7 +46,7 @@ func (a *agentEventPublisherAdapter) PublishTaskEvent(taskID string, eventType s
 	a.workflowPublisher.PublishWorkflowEvent(a.executionID, eventType, status, message, data)
 }
 
-// NewStreamingEngine 创建新的流式工作流引擎
+// NewStreamingEngine 创建新的流式工作流引擎。
 func NewStreamingEngine(config EngineConfig) *StreamingEngine {
 	baseEngine := NewEngine(config)
 
@@ -56,7 +57,8 @@ func NewStreamingEngine(config EngineConfig) *StreamingEngine {
 	}
 }
 
-// Execute 执行工作流（覆盖基类方法，支持流式）
+// Execute 执行工作流。
+// 如果定义里没有启用流式步骤，则直接退回基础 Engine，避免引入额外复杂度。
 func (e *StreamingEngine) Execute(ctx context.Context, workflow *Workflow, variables map[string]interface{}) (*WorkflowExecution, error) {
 	// 如果没有任何步骤启用流式，使用原有引擎
 	if !e.hasStreamingSteps(workflow) {
@@ -92,11 +94,12 @@ func (e *StreamingEngine) hasStreamingSteps(workflow *Workflow) bool {
 	return false
 }
 
-// executeWorkflowStreaming 执行流式工作流
+// executeWorkflowStreaming 执行流式工作流，并初始化流式专用调度状态。
 func (e *StreamingEngine) executeWorkflowStreaming(ctx context.Context, workflow *CompiledWorkflow, execution *WorkflowExecution) {
 	e.executeWorkflowStreamingWithState(ctx, workflow, execution, make(map[string]bool), make(map[string]bool))
 }
 
+// executeWorkflowStreamingWithState 支持带已有 completed/failed 状态启动，主要用于恢复场景。
 func (e *StreamingEngine) executeWorkflowStreamingWithState(
 	ctx context.Context,
 	workflow *CompiledWorkflow,
@@ -121,7 +124,7 @@ func (e *StreamingEngine) executeWorkflowStreamingWithState(
 	e.Engine.runExecutionLifecycle(ctx, workflow.Source, execution, kernel.Run)
 }
 
-// executeStepStreaming 执行流式步骤
+// executeStepStreaming 执行单个流式步骤。
 func (e *StreamingEngine) executeStepStreaming(ctx context.Context, step *Step, execution *WorkflowExecution) error {
 	return e.newStepExecutor().Execute(ctx, &CompiledStep{
 		ID:      step.ID,
@@ -129,6 +132,7 @@ func (e *StreamingEngine) executeStepStreaming(ctx context.Context, step *Step, 
 	}, execution)
 }
 
+// getStreamingOnError 读取流式步骤的 on_error 策略，并补默认值。
 func (e *StreamingEngine) getStreamingOnError(step *Step) string {
 	if step.Streaming == nil || step.Streaming.OnError == "" {
 		return DefaultOnError
@@ -136,6 +140,7 @@ func (e *StreamingEngine) getStreamingOnError(step *Step) string {
 	return step.Streaming.OnError
 }
 
+// completeStreamingStep 在流式步骤正常完成时统一写 checkpoint、关闭 buffer 并落状态。
 func (e *StreamingEngine) completeStreamingStep(
 	step *Step,
 	execution *WorkflowExecution,
@@ -161,6 +166,7 @@ func (e *StreamingEngine) completeStreamingStep(
 	})
 }
 
+// completeStreamingStepWithPartialData 处理“流式失败但允许部分结果落地”的场景。
 func (e *StreamingEngine) completeStreamingStepWithPartialData(
 	step *Step,
 	execution *WorkflowExecution,
@@ -190,6 +196,7 @@ func (e *StreamingEngine) completeStreamingStepWithPartialData(
 	)
 }
 
+// collectPartialStreamResult 把 buffer 中已接收的 chunk 合并成当前可用结果。
 func (e *StreamingEngine) collectPartialStreamResult(buffer *StreamBuffer) map[string]interface{} {
 	chunks := buffer.ReadAll()
 	if len(chunks) == 0 {
@@ -206,6 +213,7 @@ func (e *StreamingEngine) collectPartialStreamResult(buffer *StreamBuffer) map[s
 	return result
 }
 
+// executeStepStreamingFallback 在流式失败后退回阻塞模式执行当前步骤。
 func (e *StreamingEngine) executeStepStreamingFallback(
 	ctx context.Context,
 	step *Step,
@@ -307,6 +315,7 @@ func (e *StreamingEngine) executeStepStreamingFallback(
 	)
 }
 
+// waitForDependenciesCompletion 在 fallback 模式下等待所有上游步骤彻底结束。
 func (e *StreamingEngine) waitForDependenciesCompletion(
 	ctx context.Context,
 	step *Step,
@@ -348,6 +357,7 @@ func (e *StreamingEngine) waitForDependenciesCompletion(
 	}
 }
 
+// seedUpstreamFinalOutput 在只拿到最终结果、没有 buffer 的情况下，把结果补写回上下文。
 func (e *StreamingEngine) seedUpstreamFinalOutput(execution *WorkflowExecution, depID string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -365,7 +375,8 @@ func (e *StreamingEngine) seedUpstreamFinalOutput(execution *WorkflowExecution, 
 	return true
 }
 
-// subscribeToUpstream 订阅上游流式数据，等待初始数据到达后返回
+// subscribeToUpstream 订阅上游流式数据，并等待每个依赖至少提供一次初始数据。
+// 这样下游步骤启动时就能通过 ContextReader 看到最早一批上游输出。
 func (e *StreamingEngine) subscribeToUpstream(ctx context.Context, step *Step, execution *WorkflowExecution, buffer *StreamBuffer) error {
 	if len(step.DependsOn) == 0 {
 		return nil
@@ -455,7 +466,7 @@ func (e *StreamingEngine) subscribeToUpstream(ctx context.Context, step *Step, e
 	return nil
 }
 
-// estimateTokens 估算token数（简单实现）
+// estimateTokens 用较简化的规则估算 chunk 的 token 数。
 func (e *StreamingEngine) estimateTokens(data map[string]interface{}) int {
 	// 简单估算：如果有token字段，直接返回长度
 	if token, ok := data["token"].(string); ok {
@@ -465,7 +476,7 @@ func (e *StreamingEngine) estimateTokens(data map[string]interface{}) int {
 	return 1
 }
 
-// registerBuffer 注册缓冲区
+// registerBuffer 为 execution/step 注册流式缓冲区。
 func (e *StreamingEngine) registerBuffer(executionID, stepID string, buffer *StreamBuffer) {
 	e.buffersMu.Lock()
 	defer e.buffersMu.Unlock()
@@ -476,7 +487,7 @@ func (e *StreamingEngine) registerBuffer(executionID, stepID string, buffer *Str
 	e.buffers[executionID][stepID] = buffer
 }
 
-// unregisterBuffer 注销缓冲区
+// unregisterBuffer 注销指定步骤的流式缓冲区。
 func (e *StreamingEngine) unregisterBuffer(executionID, stepID string) {
 	e.buffersMu.Lock()
 	defer e.buffersMu.Unlock()
@@ -492,7 +503,7 @@ func (e *StreamingEngine) unregisterBuffer(executionID, stepID string) {
 	}
 }
 
-// getBuffer 获取缓冲区
+// getBuffer 获取指定 execution/step 对应的流式缓冲区。
 func (e *StreamingEngine) getBuffer(executionID, stepID string) *StreamBuffer {
 	e.buffersMu.RLock()
 	defer e.buffersMu.RUnlock()
@@ -504,7 +515,7 @@ func (e *StreamingEngine) getBuffer(executionID, stepID string) *StreamBuffer {
 	return executionBuffers[stepID]
 }
 
-// cleanupBuffers 清理所有缓冲区
+// cleanupBuffers 清理一次 execution 关联的全部 buffer。
 func (e *StreamingEngine) cleanupBuffers(executionID string) {
 	e.buffersMu.Lock()
 	defer e.buffersMu.Unlock()
@@ -515,7 +526,7 @@ func (e *StreamingEngine) cleanupBuffers(executionID string) {
 	delete(e.buffers, executionID)
 }
 
-// GetStreamingStatus 获取流式执行状态
+// GetStreamingStatus 返回当前 execution 的流式缓冲区状态快照。
 func (e *StreamingEngine) GetStreamingStatus(executionID string) map[string]interface{} {
 	e.buffersMu.RLock()
 	defer e.buffersMu.RUnlock()
@@ -540,14 +551,15 @@ func (e *StreamingEngine) GetStreamingStatus(executionID string) map[string]inte
 	return status
 }
 
-// executionContextReader 实现ContextReader接口，提供线程安全的Context访问
+// executionContextReader 实现 agent.ContextReader。
+// Agent 在流式执行期间可以通过它主动读取或等待上游字段，而不是只依赖静态入参。
 type executionContextReader struct {
 	execution *WorkflowExecution
 	mu        *sync.RWMutex
 	notifier  *executionNotifier
 }
 
-// newExecutionContextReader 创建ContextReader
+// newExecutionContextReader 创建上下文读取器。
 func (e *StreamingEngine) newExecutionContextReader(execution *WorkflowExecution) agent.ContextReader {
 	return &executionContextReader{
 		execution: execution,

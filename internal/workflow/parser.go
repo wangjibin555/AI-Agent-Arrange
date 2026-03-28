@@ -12,33 +12,34 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Parser handles parsing workflow definitions from various formats
+// Parser 负责把 YAML / JSON 工作流定义解析成 Workflow 结构，并做基础校验。
 type Parser struct {
 	report ValidationReport
 }
 
-// ValidationReport contains non-fatal parser findings that help improve DSL usage.
+// ValidationReport 保存解析阶段的非致命发现。
+// 这类信息不会阻止执行，但能提示 DSL 是否有更合适的建模方式。
 type ValidationReport struct {
 	Warnings    []string `json:"warnings,omitempty"`
 	Suggestions []string `json:"suggestions,omitempty"`
 }
 
-// NewParser creates a new workflow parser
+// NewParser 创建工作流解析器。
 func NewParser() *Parser {
 	return &Parser{}
 }
 
-// ValidateDefinition validates a workflow definition using the same rules as parser input handling.
+// ValidateDefinition 使用与解析输入相同的规则校验工作流定义。
 func ValidateDefinition(wf *Workflow) error {
 	return NewParser().validate(wf)
 }
 
-// Warnings returns non-fatal validation warnings from the last parse.
+// Warnings 返回最近一次解析得到的 warning 列表。
 func (p *Parser) Warnings() []string {
 	return append([]string(nil), p.report.Warnings...)
 }
 
-// LastReport returns the validation report from the last parse.
+// LastReport 返回最近一次解析的完整报告。
 func (p *Parser) LastReport() ValidationReport {
 	return ValidationReport{
 		Warnings:    append([]string(nil), p.report.Warnings...),
@@ -46,7 +47,7 @@ func (p *Parser) LastReport() ValidationReport {
 	}
 }
 
-// ParseYAML parses a workflow from YAML content
+// ParseYAML 从 YAML 内容解析工作流。
 func (p *Parser) ParseYAML(content []byte) (*Workflow, error) {
 	p.resetWarnings()
 
@@ -62,7 +63,7 @@ func (p *Parser) ParseYAML(content []byte) (*Workflow, error) {
 	return &wf, nil
 }
 
-// ParseYAMLCompiled parses YAML and compiles it into a runtime plan.
+// ParseYAMLCompiled 解析 YAML，并直接产出编译后的运行计划。
 func (p *Parser) ParseYAMLCompiled(content []byte) (*CompiledWorkflow, error) {
 	wf, err := p.ParseYAML(content)
 	if err != nil {
@@ -71,7 +72,7 @@ func (p *Parser) ParseYAMLCompiled(content []byte) (*CompiledWorkflow, error) {
 	return CompileWorkflow(wf)
 }
 
-// ParseJSON parses a workflow from JSON content
+// ParseJSON 从 JSON 内容解析工作流。
 func (p *Parser) ParseJSON(content []byte) (*Workflow, error) {
 	p.resetWarnings()
 
@@ -87,7 +88,7 @@ func (p *Parser) ParseJSON(content []byte) (*Workflow, error) {
 	return &wf, nil
 }
 
-// ParseJSONCompiled parses JSON and compiles it into a runtime plan.
+// ParseJSONCompiled 解析 JSON，并直接产出编译后的运行计划。
 func (p *Parser) ParseJSONCompiled(content []byte) (*CompiledWorkflow, error) {
 	wf, err := p.ParseJSON(content)
 	if err != nil {
@@ -96,7 +97,7 @@ func (p *Parser) ParseJSONCompiled(content []byte) (*CompiledWorkflow, error) {
 	return CompileWorkflow(wf)
 }
 
-// ParseYAMLFile parses a workflow from a YAML file
+// ParseYAMLFile 从 YAML 文件解析工作流。
 func (p *Parser) ParseYAMLFile(filepath string) (*Workflow, error) {
 	content, err := os.ReadFile(filepath)
 	if err != nil {
@@ -115,7 +116,7 @@ func (p *Parser) ParseYAMLFileCompiled(filepath string) (*CompiledWorkflow, erro
 	return p.ParseYAMLCompiled(content)
 }
 
-// ParseJSONFile parses a workflow from a JSON file
+// ParseJSONFile 从 JSON 文件解析工作流。
 func (p *Parser) ParseJSONFile(filepath string) (*Workflow, error) {
 	content, err := os.ReadFile(filepath)
 	if err != nil {
@@ -134,7 +135,8 @@ func (p *Parser) ParseJSONFileCompiled(filepath string) (*CompiledWorkflow, erro
 	return p.ParseJSONCompiled(content)
 }
 
-// validate validates a workflow definition
+// validate 执行工作流定义的结构校验。
+// 这里主要检查字段完整性、依赖存在性、route/foreach 规则以及 DAG 合法性。
 func (p *Parser) validate(wf *Workflow) error {
 	if wf.Name == "" {
 		return apperr.InvalidArgument("workflow name is required").WithCode("workflow_name_required")
@@ -205,6 +207,7 @@ func (p *Parser) addSuggestion(format string, args ...interface{}) {
 	p.report.Suggestions = append(p.report.Suggestions, fmt.Sprintf(format, args...))
 }
 
+// validateRoute 校验 route 的表达式、目标节点和依赖关系是否正确。
 func (p *Parser) validateRoute(step *Step, stepMap map[string]*Step) error {
 	if step.Route == nil {
 		return nil
@@ -246,6 +249,7 @@ func (p *Parser) validateRoute(step *Step, stepMap map[string]*Step) error {
 	return nil
 }
 
+// validateForeach 校验 foreach 的最小配置约束。
 func (p *Parser) validateForeach(step *Step) error {
 	if step.Foreach == nil {
 		return nil
@@ -265,6 +269,7 @@ func (p *Parser) validateForeach(step *Step) error {
 	return nil
 }
 
+// collectConditionalBranchWarnings 用启发式规则识别“看起来更像 route 的条件分支”。
 func (p *Parser) collectConditionalBranchWarnings(wf *Workflow) {
 	groups := make(map[string][]*Step)
 	for _, step := range wf.Steps {
@@ -304,7 +309,7 @@ func dependencyGroupKey(dependsOn []string) string {
 	return strings.Join(deps, ", ")
 }
 
-// willExist checks if a step ID will exist later in the steps array
+// willExist 判断某个步骤 ID 是否会在后续步骤中出现。
 func (p *Parser) willExist(stepID string, steps []*Step) bool {
 	for _, step := range steps {
 		if step.ID == stepID {
@@ -314,7 +319,7 @@ func (p *Parser) willExist(stepID string, steps []*Step) bool {
 	return false
 }
 
-// ToYAML converts a workflow to YAML format
+// ToYAML 把工作流结构重新序列化为 YAML。
 func (p *Parser) ToYAML(wf *Workflow) ([]byte, error) {
 	data, err := yaml.Marshal(wf)
 	if err != nil {
@@ -323,7 +328,7 @@ func (p *Parser) ToYAML(wf *Workflow) ([]byte, error) {
 	return data, nil
 }
 
-// ToJSON converts a workflow to JSON format
+// ToJSON 把工作流结构重新序列化为 JSON。
 func (p *Parser) ToJSON(wf *Workflow) ([]byte, error) {
 	data, err := json.MarshalIndent(wf, "", "  ")
 	if err != nil {

@@ -15,20 +15,27 @@ type executionBootstrapOptions struct {
 	InitializeCheckpoints bool
 }
 
+// runtimeRunResult 表示一次 runtime kernel 调度循环的最终结果。
+// 它只表达调度阶段的结论，真正写回 execution 状态由上层生命周期管理统一完成。
 type runtimeRunResult struct {
 	Status  WorkflowStatus
 	Message string
 }
 
+// stepExecutor 抽象具体步骤的执行方式。
+// runtime kernel 不关心步骤是阻塞执行、流式执行还是 foreach，只通过该接口统一调用。
 type stepExecutor interface {
 	Execute(ctx context.Context, step *CompiledStep, execution *WorkflowExecution) error
 }
 
+// workflowStepExecutor 根据步骤配置选择具体的 StepRunner 实现。
 type workflowStepExecutor struct {
 	engine    *Engine
 	streaming *StreamingEngine
 }
 
+// runtimeKernel 是工作流运行时的核心调度器。
+// 它维护“已完成 / 已失败 / 正在运行”三个集合，并持续尝试调度当前可执行的步骤。
 type runtimeKernel struct {
 	engine         *Engine
 	streaming      *StreamingEngine
@@ -43,6 +50,7 @@ type runtimeKernel struct {
 	mu             sync.Mutex
 }
 
+// bootstrapExecution 创建新的 WorkflowExecution，并完成缓存注册、停止控制和启动事件发布。
 func (e *Engine) bootstrapExecution(
 	ctx context.Context,
 	workflow *Workflow,
@@ -67,6 +75,7 @@ func (e *Engine) bootstrapExecution(
 		execution.Checkpoints = make(map[string]*StreamCheckpoint)
 	}
 
+	// 先注入本次调用传入的变量，再叠加工作流定义中的默认变量。
 	for k, v := range workflow.Variables {
 		execution.Context.SetVariable(k, v)
 	}
@@ -95,6 +104,7 @@ func (e *Engine) bootstrapExecution(
 	return execution, runCtx, nil
 }
 
+// runExecutionLifecycle 统一处理执行超时、取消和最终状态收口。
 func (e *Engine) runExecutionLifecycle(
 	ctx context.Context,
 	workflow *Workflow,
@@ -123,10 +133,12 @@ func (e *Engine) runExecutionLifecycle(
 	}
 }
 
+// newStepExecutor 为普通 Engine 创建步骤执行器。
 func (e *Engine) newStepExecutor() stepExecutor {
 	return workflowStepExecutor{engine: e}
 }
 
+// newStepExecutor 为 StreamingEngine 创建带流式能力的步骤执行器。
 func (e *StreamingEngine) newStepExecutor() stepExecutor {
 	return workflowStepExecutor{
 		engine:    e.Engine,
@@ -134,6 +146,7 @@ func (e *StreamingEngine) newStepExecutor() stepExecutor {
 	}
 }
 
+// Execute 根据步骤配置选择 blocking / streaming / foreach 三种执行模式之一。
 func (x workflowStepExecutor) Execute(ctx context.Context, step *CompiledStep, execution *WorkflowExecution) error {
 	runtimeStep := step.Runtime
 	switch {
@@ -146,6 +159,8 @@ func (x workflowStepExecutor) Execute(ctx context.Context, step *CompiledStep, e
 	}
 }
 
+// newRuntimeKernel 创建一个运行时调度内核，并为每个步骤初始化触发器。
+// 对于流式工作流，这里会把上游 buffer 关联到 trigger，支持 partial 启动。
 func newRuntimeKernel(
 	engine *Engine,
 	streaming *StreamingEngine,
@@ -184,6 +199,8 @@ func newRuntimeKernel(
 	return kernel
 }
 
+// Run 持续调度直到所有步骤进入终态，或上下文被取消。
+// 它本身不直接落库，只维护运行态集合并在结束时给出整体结果。
 func (k *runtimeKernel) Run(ctx context.Context) runtimeRunResult {
 	semaphore := make(chan struct{}, k.engine.maxConcurrency)
 	var wg sync.WaitGroup
@@ -231,6 +248,8 @@ func (k *runtimeKernel) Run(ctx context.Context) runtimeRunResult {
 	}
 }
 
+// tryScheduleReadySteps 尝试扫描并启动当前所有可执行步骤。
+// 每一轮都会重新评估决策，因此工作流行为由最新上下文和依赖状态驱动。
 func (k *runtimeKernel) tryScheduleReadySteps(ctx context.Context, wg *sync.WaitGroup, semaphore chan struct{}) {
 	for _, step := range k.workflow.Steps {
 		k.mu.Lock()
@@ -259,6 +278,7 @@ func (k *runtimeKernel) tryScheduleReadySteps(ctx context.Context, wg *sync.Wait
 			continue
 		}
 
+		// 对流式 partial 步骤，还要判断是否已经满足最小启动条件。
 		start, triggerReason := k.canStartStep(step)
 		if !start {
 			continue
@@ -298,6 +318,8 @@ func (k *runtimeKernel) tryScheduleReadySteps(ctx context.Context, wg *sync.Wait
 	}
 }
 
+// canStartStep 负责处理流式 partial 启动场景。
+// 普通步骤直接放行；流式步骤则需要依赖 trigger 检查上游 chunk 是否已达到启动阈值。
 func (k *runtimeKernel) canStartStep(step *CompiledStep) (bool, string) {
 	if step == nil || step.Runtime == nil {
 		return false, ""
@@ -353,12 +375,14 @@ func (k *runtimeKernel) canStartStep(step *CompiledStep) (bool, string) {
 	return false, ""
 }
 
+// allStepsTerminal 判断所有步骤是否都已进入 completed / failed 终态集合。
 func (k *runtimeKernel) allStepsTerminal() bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return len(k.completed)+len(k.failed) >= len(k.workflow.Steps)
 }
 
+// copyCompletedSteps 返回 completed 集合副本，避免调度决策时持锁过久。
 func (k *runtimeKernel) copyCompletedSteps() map[string]bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -369,6 +393,7 @@ func (k *runtimeKernel) copyCompletedSteps() map[string]bool {
 	return out
 }
 
+// copyFailedSteps 返回 failed 集合副本，避免调度决策时持锁过久。
 func (k *runtimeKernel) copyFailedSteps() map[string]bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -379,6 +404,7 @@ func (k *runtimeKernel) copyFailedSteps() map[string]bool {
 	return out
 }
 
+// markDecisionFailure 处理“连步骤能否执行都判断失败”的异常场景。
 func (k *runtimeKernel) markDecisionFailure(step *CompiledStep, err error) {
 	k.mu.Lock()
 	k.failed[step.ID] = true

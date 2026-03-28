@@ -8,15 +8,15 @@ import (
 	"github.com/wangjibin555/AI-Agent-Arrange/pkg/apperr"
 )
 
-// MemoryRepository is an in-memory implementation of Repository
-// Useful for testing and development
+// MemoryRepository 是 Repository 的内存版实现。
+// 主要用于测试、示例和不需要持久化的开发场景。
 type MemoryRepository struct {
 	workflows  map[string]*Workflow
 	executions map[string]*WorkflowExecution
 	mu         sync.RWMutex
 }
 
-// NewMemoryRepository creates a new in-memory repository
+// NewMemoryRepository 创建内存仓储。
 func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{
 		workflows:  make(map[string]*Workflow),
@@ -24,7 +24,7 @@ func NewMemoryRepository() *MemoryRepository {
 	}
 }
 
-// SaveWorkflow saves a workflow
+// SaveWorkflow 保存工作流定义。
 func (r *MemoryRepository) SaveWorkflow(_ context.Context, workflow *Workflow) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -34,7 +34,7 @@ func (r *MemoryRepository) SaveWorkflow(_ context.Context, workflow *Workflow) e
 	return nil
 }
 
-// GetWorkflow retrieves a workflow by ID
+// GetWorkflow 按 ID 获取工作流定义。
 func (r *MemoryRepository) GetWorkflow(_ context.Context, id string) (*Workflow, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -47,7 +47,7 @@ func (r *MemoryRepository) GetWorkflow(_ context.Context, id string) (*Workflow,
 	return workflow, nil
 }
 
-// ListWorkflows returns all workflows
+// ListWorkflows 返回全部工作流定义。
 func (r *MemoryRepository) ListWorkflows(_ context.Context) ([]*Workflow, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -60,7 +60,7 @@ func (r *MemoryRepository) ListWorkflows(_ context.Context) ([]*Workflow, error)
 	return workflows, nil
 }
 
-// DeleteWorkflow deletes a workflow
+// DeleteWorkflow 删除工作流定义。
 func (r *MemoryRepository) DeleteWorkflow(_ context.Context, id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -73,7 +73,7 @@ func (r *MemoryRepository) DeleteWorkflow(_ context.Context, id string) error {
 	return nil
 }
 
-// SaveExecution saves a workflow execution
+// SaveExecution 保存工作流执行快照。
 func (r *MemoryRepository) SaveExecution(_ context.Context, execution *WorkflowExecution) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -82,7 +82,7 @@ func (r *MemoryRepository) SaveExecution(_ context.Context, execution *WorkflowE
 	return nil
 }
 
-// GetExecution retrieves an execution by ID
+// GetExecution 按 ID 获取工作流执行快照。
 func (r *MemoryRepository) GetExecution(_ context.Context, id string) (*WorkflowExecution, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -95,7 +95,7 @@ func (r *MemoryRepository) GetExecution(_ context.Context, id string) (*Workflow
 	return execution, nil
 }
 
-// ListExecutions returns all executions for a workflow
+// ListExecutions 返回某个工作流的全部执行记录。
 func (r *MemoryRepository) ListExecutions(_ context.Context, workflowID string) ([]*WorkflowExecution, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -110,7 +110,7 @@ func (r *MemoryRepository) ListExecutions(_ context.Context, workflowID string) 
 	return executions, nil
 }
 
-// GetRunningExecutions returns all currently running executions
+// GetRunningExecutions 返回当前仍处于 running 状态的执行。
 func (r *MemoryRepository) GetRunningExecutions(_ context.Context) ([]*WorkflowExecution, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
